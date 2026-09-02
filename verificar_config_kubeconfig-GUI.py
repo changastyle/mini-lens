@@ -45,6 +45,10 @@ from PySide6.QtWidgets import (
     QSplitter,
     QFrame,
     QSizePolicy,
+    QTabWidget,
+    QScrollArea,
+    QTextEdit,
+    QDialog,
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont, QIcon, QDragEnterEvent, QDropEvent, QColor, QPalette, QGuiApplication
@@ -355,12 +359,41 @@ class KubeconfigViewerWindow(QMainWindow):
         pods_header.addWidget(self.btn_test_connection)
         col3_layout.addLayout(pods_header)
 
-        self.table_pods = QTableWidget(0, 3)
-        self.table_pods.setHorizontalHeaderLabels(["NAME", "STATUS", "READY"])
-        self.table_pods.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table_pods = QTableWidget(0, 5)
+        self.table_pods.setHorizontalHeaderLabels(["NAME", "STATUS", "READY", "IP", ""])
+        self.table_pods.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table_pods.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table_pods.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_pods.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table_pods.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.table_pods.doubleClicked.connect(self.on_pod_double_click)
         col3_layout.addWidget(self.table_pods)
 
-        # 3b - ESTADO DE CONEXION DEBAJO DE LA TABLA + BOTON COPIAR:
+        # 3b - SECCION DE SERVICES:
+        svc_header = QHBoxLayout()
+        self.lbl_services_title = QLabel("\U0001F310  Services del namespace:")
+        self.lbl_services_title.setObjectName("detail_value")
+        svc_header.addWidget(self.lbl_services_title, stretch=1)
+        col3_layout.addLayout(svc_header)
+
+        svc_help = QLabel(
+            "Un SERVICE es una direccion estable que apunta a uno o mas pods. "
+            "Tiene una Cluster IP (interna del cluster) y puertos expuestos."
+        )
+        svc_help.setObjectName("help")
+        svc_help.setWordWrap(True)
+        col3_layout.addWidget(svc_help)
+
+        self.table_services = QTableWidget(0, 5)
+        self.table_services.setHorizontalHeaderLabels(["NAME", "TYPE", "CLUSTER IP", "PORTS", ""])
+        self.table_services.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table_services.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.table_services.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table_services.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.table_services.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        col3_layout.addWidget(self.table_services)
+
+        # 3c - ESTADO DE CONEXION DEBAJO DE LA TABLA + BOTON COPIAR:
         conn_status_layout = QHBoxLayout()
         self.lbl_connection_status = QLabel("-")
         self.lbl_connection_status.setWordWrap(True)
@@ -574,10 +607,12 @@ class KubeconfigViewerWindow(QMainWindow):
         self.lbl_ctx_user.setText(str(ctx_data.get("user", "-")))
         self.lbl_ctx_cluster.setText(str(ctx_data.get("cluster", "-")))
 
-        # 4 - LIMPIO LA TABLA DE PODS Y EL TITULO:
+        # 4 - LIMPIO LAS TABLAS DE PODS Y SERVICES:
         self.table_pods.setRowCount(0)
+        self.table_services.setRowCount(0)
         self.lbl_connection_status.setText("-")
         self.lbl_pods_title.setText(f"{ICON_POD}  Pods del namespace:")
+        self.lbl_services_title.setText("\U0001F310  Services del namespace:")
 
         # 5 - GUARDO EL CONTEXT SELECCIONADO Y HABILITO EL BOTON:
         self.selected_context_name = name
@@ -586,6 +621,11 @@ class KubeconfigViewerWindow(QMainWindow):
 
         # 6 - CONECTO AUTOMATICAMENTE AL CLUSTER Y LISTO LOS PODS:
         self.on_test_connection()
+
+    def _copy_to_clipboard(self, text):
+        # 1 - COPIO UN TEXTO AL PORTAPAPELES:
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(text)
 
     def on_copy_error(self):
         # 1 - COPIO EL TEXTO DEL ERROR AL PORTAPAPELES:
@@ -630,6 +670,7 @@ class KubeconfigViewerWindow(QMainWindow):
 
             # 7 - TRANSFORMO LA RESPUESTA (PodList) A FILAS DE LA TABLA:
             pods = pod_list.items
+            self._pods_cache = {pod.metadata.name: pod for pod in pods}
             self.table_pods.setRowCount(len(pods))
 
             for i, pod in enumerate(pods):
@@ -647,17 +688,70 @@ class KubeconfigViewerWindow(QMainWindow):
                 else:
                     ready_str = "-"
 
+                # 7d - IP DEL POD:
+                pod_ip = pod.status.pod_ip if pod.status and pod.status.pod_ip else "-"
+
                 self.table_pods.setItem(i, 0, QTableWidgetItem(f"{ICON_POD}  {name}"))
                 self.table_pods.setItem(i, 1, QTableWidgetItem(status))
                 self.table_pods.setItem(i, 2, QTableWidgetItem(ready_str))
+                self.table_pods.setItem(i, 3, QTableWidgetItem(pod_ip))
 
-            # 8 - MUESTRO EL RESULTADO EN EL TITULO Y DEBAJO DE LA TABLA:
-            n = len(pods)
+                # 7e - BOTON COPIAR IP EN LA COLUMNA 4:
+                if pod_ip != "-":
+                    btn_copy_ip = QPushButton("Copiar IP")
+                    btn_copy_ip.setMaximumWidth(80)
+                    btn_copy_ip.clicked.connect(lambda checked, ip=pod_ip: self._copy_to_clipboard(ip))
+                    self.table_pods.setCellWidget(i, 4, btn_copy_ip)
+
+            # 8 - LISTO LOS SERVICES DEL NAMESPACE:
+            #    list_namespaced_service(namespace=...) hace GET a:
+            #    /api/v1/namespaces/{namespace}/services
+            svc_list = v1.list_namespaced_service(namespace=self.selected_namespace)
+            services = svc_list.items
+            self.table_services.setRowCount(len(services))
+
+            for i, svc in enumerate(services):
+                # 8a - NOMBRE DEL SERVICE:
+                svc_name = svc.metadata.name
+
+                # 8b - TIPO (ClusterIP, NodePort, LoadBalancer):
+                svc_type = svc.spec.type or "ClusterIP"
+
+                # 8c - CLUSTER IP:
+                cluster_ip = svc.spec.cluster_ip or "-"
+
+                # 8d - PUERTOS (ej: "8080/TCP, 443/TCP"):
+                if svc.spec.ports:
+                    ports_str = ", ".join(
+                        f"{p.port}/{p.protocol}" + (f" -> {p.target_port}" if p.target_port and str(p.target_port) != str(p.port) else "")
+                        for p in svc.spec.ports
+                    )
+                else:
+                    ports_str = "-"
+
+                self.table_services.setItem(i, 0, QTableWidgetItem(f"\U0001F310  {svc_name}"))
+                self.table_services.setItem(i, 1, QTableWidgetItem(svc_type))
+                self.table_services.setItem(i, 2, QTableWidgetItem(cluster_ip))
+                self.table_services.setItem(i, 3, QTableWidgetItem(ports_str))
+
+                # 8e - BOTON COPIAR CLUSTER IP:
+                if cluster_ip != "-":
+                    btn_copy_svc_ip = QPushButton("Copiar IP")
+                    btn_copy_svc_ip.setMaximumWidth(80)
+                    btn_copy_svc_ip.clicked.connect(lambda checked, ip=cluster_ip: self._copy_to_clipboard(ip))
+                    self.table_services.setCellWidget(i, 4, btn_copy_svc_ip)
+
+            # 9 - MUESTRO EL RESULTADO EN LOS TITULOS Y DEBAJO DE LA TABLA:
+            n_pods = len(pods)
+            n_svcs = len(services)
             self.lbl_pods_title.setText(
-                f"{ICON_POD}  Pods del namespace:  ({n})"
+                f"{ICON_POD}  Pods del namespace:  ({n_pods})"
+            )
+            self.lbl_services_title.setText(
+                f"\U0001F310  Services del namespace:  ({n_svcs})"
             )
             self.lbl_connection_status.setText(
-                f"{ICON_OK}  Conexion exitosa! {n} pod(s) en namespace '{self.selected_namespace}'"
+                f"{ICON_OK}  Conexion exitosa! {n_pods} pod(s), {n_svcs} service(s) en namespace '{self.selected_namespace}'"
             )
 
         except ApiException as e:
@@ -681,6 +775,301 @@ class KubeconfigViewerWindow(QMainWindow):
         finally:
             # 10b - REHABILITO EL BOTON:
             self.btn_test_connection.setEnabled(True)
+
+
+    def on_pod_double_click(self, index):
+        # 1 - OBTENGO EL NOMBRE DEL POD DE LA FILA SELECCIONADA:
+        row = index.row()
+        name_item = self.table_pods.item(row, 0)
+        if not name_item:
+            return
+
+        # 2 - EXTRAIGO EL NOMBRE (sin el icono):
+        pod_name = name_item.text().replace(f"{ICON_POD}  ", "")
+
+        # 3 - BUSCO EL POD EN EL CACHE:
+        pod = self._pods_cache.get(pod_name)
+        if not pod:
+            return
+
+        # 4 - ABRO LA VENTANA DE DETALLE DEL POD:
+        detail_window = PodDetailWindow(pod, self)
+        detail_window.exec()
+
+
+class PodDetailWindow(QDialog):
+    """Ventana modal con todos los detalles de un Pod."""
+
+    def __init__(self, pod, parent=None):
+        super().__init__(parent)
+
+        # 1 - CONFIGURO LA VENTANA:
+        self.setWindowTitle(f"{ICON_POD}  Detalle del Pod: {pod.metadata.name}")
+        self.resize(700, 800)
+
+        # 2 - LAYOUT PRINCIPAL CON SCROLL:
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll_content = QWidget()
+        scroll.setWidget(scroll_content)
+        main_layout = QVBoxLayout(scroll_content)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.addWidget(scroll)
+
+        # 3 - BOTON CERRAR:
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(self.accept)
+        outer_layout.addWidget(btn_close)
+
+        # 4 - POBLA TODAS LAS SECCIONES (orden por importancia):
+        #    Primero lo mas importante: datos basicos, containers, volumes, env vars.
+        #    Despues lo secundario: labels, annotations, conditions.
+        self._add_datos_basicos(main_layout, pod)
+        self._add_containers(main_layout, pod)
+        self._add_volumes(main_layout, pod)
+        self._add_env_vars(main_layout, pod)
+        self._add_labels(main_layout, pod)
+        self._add_annotations(main_layout, pod)
+        self._add_conditions(main_layout, pod)
+
+    def _add_section_title(self, layout, title):
+        lbl = QLabel(title)
+        lbl.setObjectName("detail_value")
+        lbl.setStyleSheet(
+            "font-size: 16px; font-weight: bold; color: #f5c518; "
+            "border-bottom: 2px solid #f5c518; padding: 8px 0 4px 0; margin-top: 10px;"
+        )
+        layout.addWidget(lbl)
+
+    def _add_row(self, layout, label, value):
+        row_layout = QHBoxLayout()
+        lbl = QLabel(f"{label}:")
+        lbl.setStyleSheet("font-weight: bold; color: #e0e0e0; min-width: 140px;")
+        val = QLabel(str(value))
+        val.setWordWrap(True)
+        val.setStyleSheet("color: #f5c518;")
+        row_layout.addWidget(lbl)
+        row_layout.addWidget(val, stretch=1)
+        layout.addLayout(row_layout)
+
+    def _add_datos_basicos(self, layout, pod):
+        self._add_section_title(layout, f"{ICON_INFO}  Datos basicos")
+
+        meta = pod.metadata
+        status = pod.status
+        spec = pod.spec
+
+        # 1 - NOMBRE EN GRANDE Y NEGRITA (lo mas importante):
+        name_label = QLabel(f"{ICON_POD}  {meta.name}")
+        name_label.setStyleSheet(
+            "font-size: 22px; font-weight: bold; color: #f5c518; "
+            "padding: 6px 0 2px 0;"
+        )
+        layout.addWidget(name_label)
+
+        # 2 - DATOS CLAVE JUSTO DEBAJO DEL NOMBRE (lo mas relevante):
+        self._add_row(layout, "Pod IP", status.pod_ip if status and status.pod_ip else "-")
+        self._add_row(layout, "Phase", status.phase if status and status.phase else "-")
+        self._add_row(layout, "QoS class", status.qos_class if status and status.qos_class else "-")
+        self._add_row(layout, "Start time", status.start_time.strftime("%Y-%m-%d %H:%M:%S") if status and status.start_time else "-")
+
+        # 3 - DATOS SECUNDARIOS DEBAJO:
+        self._add_row(layout, "Namespace", meta.namespace)
+        self._add_row(layout, "Node", spec.node_name if spec and spec.node_name else "-")
+        self._add_row(layout, "Host IP", status.host_ip if status and status.host_ip else "-")
+        self._add_row(layout, "Restart policy", spec.restart_policy if spec and spec.restart_policy else "-")
+        self._add_row(layout, "Service account", spec.service_account if spec and spec.service_account else "-")
+        self._add_row(layout, "UID", meta.uid)
+        self._add_row(layout, "Creado", meta.creation_timestamp.strftime("%Y-%m-%d %H:%M:%S") if meta.creation_timestamp else "-")
+        self._add_row(layout, "Priority", spec.priority if spec and spec.priority is not None else "-")
+        self._add_row(layout, "DNS policy", spec.dns_policy if spec and spec.dns_policy else "-")
+
+    def _add_labels(self, layout, pod):
+        self._add_section_title(layout, f"\U0001F3F7  Labels")
+        meta = pod.metadata
+        if meta.labels:
+            for k, v in meta.labels.items():
+                self._add_row(layout, k, v)
+        else:
+            layout.addWidget(QLabel("(sin labels)"))
+
+    def _add_annotations(self, layout, pod):
+        self._add_section_title(layout, f"\U0001F4DD  Annotations")
+        meta = pod.metadata
+        if meta.annotations:
+            for k, v in meta.annotations.items():
+                self._add_row(layout, k, v)
+        else:
+            layout.addWidget(QLabel("(sin annotations)"))
+
+    def _add_conditions(self, layout, pod):
+        self._add_section_title(layout, f"{ICON_OK}  Conditions")
+        status = pod.status
+        if status and status.conditions:
+            for cond in status.conditions:
+                val = "true" if cond.status == "True" else "false"
+                self._add_row(layout, cond.type, val)
+        else:
+            layout.addWidget(QLabel("(sin conditions)"))
+
+    def _add_containers(self, layout, pod):
+        self._add_section_title(layout, f"{ICON_POD}  Containers")
+        spec = pod.spec
+        status = pod.status
+
+        if not spec or not spec.containers:
+            layout.addWidget(QLabel("(sin containers)"))
+            return
+
+        # 1 - MAPEO DE ESTADOS DE CONTAINERS POR NOMBRE:
+        cs_map = {}
+        if status and status.container_statuses:
+            for cs in status.container_statuses:
+                cs_map[cs.name] = cs
+
+        for c in spec.containers:
+            cs = cs_map.get(c.name, None)
+
+            # 2 - GRUPO PARA CADA CONTAINER:
+            group = QGroupBox(f"{ICON_POD}  {c.name}")
+            form = QFormLayout(group)
+
+            form.addRow("Image:", QLabel(c.image or "-"))
+
+            # 3 - ESTADO DEL CONTAINER:
+            if cs:
+                form.addRow("Ready:", QLabel("true" if cs.ready else "false"))
+                form.addRow("Restart count:", QLabel(str(cs.restart_count)))
+                if cs.state:
+                    if cs.state.running:
+                        form.addRow("State:", QLabel(f"Running (started: {cs.state.running.started_at.strftime('%Y-%m-%d %H:%M:%S') if cs.state.running.started_at else '-'})"))
+                    elif cs.state.waiting:
+                        form.addRow("State:", QLabel(f"Waiting: {cs.state.waiting.reason or ''} - {cs.state.waiting.message or ''}"))
+                    elif cs.state.terminated:
+                        form.addRow("State:", QLabel(f"Terminated: {cs.state.terminated.reason or ''} (exit code: {cs.state.terminated.exit_code})"))
+                if cs.last_state:
+                    if cs.last_state.terminated:
+                        form.addRow("Last state:", QLabel(f"Terminated: {cs.last_state.terminated.reason or ''} (exit code: {cs.last_state.terminated.exit_code})"))
+                    else:
+                        form.addRow("Last state:", QLabel("-"))
+            else:
+                form.addRow("Status:", QLabel("(sin datos)"))
+
+            # 4 - COMANDO Y ARGS:
+            if c.command:
+                form.addRow("Command:", QLabel(" ".join(c.command)))
+            if c.args:
+                form.addRow("Args:", QLabel(" ".join(c.args)))
+
+            # 5 - PUERTOS:
+            if c.ports:
+                ports_str = ", ".join(f"{p.container_port}/{p.protocol}" + (f" (name: {p.name})" if p.name else "") for p in c.ports)
+                form.addRow("Ports:", QLabel(ports_str))
+            else:
+                form.addRow("Ports:", QLabel("-"))
+
+            # 6 - RESOURCES (CPU / Memoria):
+            if c.resources and (c.resources.requests or c.resources.limits):
+                req_parts = []
+                lim_parts = []
+                if c.resources.requests:
+                    for k, v in c.resources.requests.items():
+                        req_parts.append(f"{k}={v}")
+                if c.resources.limits:
+                    for k, v in c.resources.limits.items():
+                        lim_parts.append(f"{k}={v}")
+                form.addRow("Requests:", QLabel(", ".join(req_parts) if req_parts else "-"))
+                form.addRow("Limits:", QLabel(", ".join(lim_parts) if lim_parts else "-"))
+            else:
+                form.addRow("Resources:", QLabel("-"))
+
+            # 7 - VOLUME MOUNTS:
+            if c.volume_mounts:
+                vm_str = ", ".join(f"{vm.name} -> {vm.mount_path}" + (f" (ro)" if vm.read_only else "") for vm in c.volume_mounts)
+                form.addRow("Volume mounts:", QLabel(vm_str))
+            else:
+                form.addRow("Volume mounts:", QLabel("-"))
+
+            # 8 - PROBES:
+            if c.liveness_probe:
+                form.addRow("Liveness probe:", QLabel(str(c.liveness_probe._type if hasattr(c.liveness_probe, '_type') else c.liveness_probe)))
+            if c.readiness_probe:
+                form.addRow("Readiness probe:", QLabel(str(c.readiness_probe._type if hasattr(c.readiness_probe, '_type') else c.readiness_probe)))
+
+            # 9 - IMAGE PULL POLICY:
+            form.addRow("Image pull policy:", QLabel(c.image_pull_policy or "-"))
+
+            layout.addWidget(group)
+
+    def _add_volumes(self, layout, pod):
+        self._add_section_title(layout, f"\U0001F4BF  Volumes")
+        spec = pod.spec
+
+        if not spec or not spec.volumes:
+            layout.addWidget(QLabel("(sin volumes)"))
+            return
+
+        for v in spec.volumes:
+            group = QGroupBox(v.name)
+            form = QFormLayout(group)
+
+            # 1 - DETECTO EL TIPO DE VOLUME:
+            if v.config_map:
+                form.addRow("Tipo:", QLabel("ConfigMap"))
+                form.addRow("ConfigMap name:", QLabel(v.config_map.name or "-"))
+            elif v.secret:
+                form.addRow("Tipo:", QLabel("Secret"))
+                form.addRow("Secret name:", QLabel(v.secret.secret_name or "-"))
+                form.addRow("Optional:", QLabel(str(v.secret.optional)))
+            elif v.empty_dir:
+                form.addRow("Tipo:", QLabel("EmptyDir"))
+                form.addRow("Medium:", QLabel(v.empty_dir.medium or "default"))
+            elif v.persistent_volume_claim:
+                form.addRow("Tipo:", QLabel("PersistentVolumeClaim"))
+                form.addRow("PVC name:", QLabel(v.persistent_volume_claim.claim_name or "-"))
+            elif v.host_path:
+                form.addRow("Tipo:", QLabel("HostPath"))
+                form.addRow("Path:", QLabel(v.host_path.path or "-"))
+            else:
+                form.addRow("Tipo:", QLabel("(otros)"))
+
+            layout.addWidget(group)
+
+    def _add_env_vars(self, layout, pod):
+        self._add_section_title(layout, f"\U0001F511  Environment Variables")
+        spec = pod.spec
+
+        if not spec or not spec.containers:
+            layout.addWidget(QLabel("(sin containers)"))
+            return
+
+        for c in spec.containers:
+            if not c.env:
+                continue
+
+            group = QGroupBox(f"{ICON_USER}  {c.name}")
+            form = QFormLayout(group)
+
+            for env in c.env:
+                # 1 - SI VIENE DE UN SECRET/CONFIGMAP, MUESTRO LA REFERENCIA:
+                if env.value_from:
+                    if env.value_from.secret_key_ref:
+                        ref = env.value_from.secret_key_ref
+                        form.addRow(f"{env.name}", QLabel(f"[Secret: {ref.name}/{ref.key}]"))
+                    elif env.value_from.config_map_key_ref:
+                        ref = env.value_from.config_map_key_ref
+                        form.addRow(f"{env.name}", QLabel(f"[ConfigMap: {ref.name}/{ref.key}]"))
+                    elif env.value_from.field_ref:
+                        ref = env.value_from.field_ref
+                        form.addRow(f"{env.name}", QLabel(f"[FieldRef: {ref.field_path}]"))
+                    else:
+                        form.addRow(f"{env.name}", QLabel("[ref]"))
+                else:
+                    # 2 - VALOR DIRECTO (puede contener tokens/sensibles):
+                    form.addRow(f"{env.name}", QLabel(env.value or "-"))
+
+            layout.addWidget(group)
 
 
 def main():
