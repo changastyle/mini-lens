@@ -1,0 +1,699 @@
+"""
+Test GUI: verifica la lectura del kubeconfig con layout de 3 columnas.
+
+Columna 1: Clusters
+Columna 2: Contexts (al clickear un cluster)
+Columna 3: Detalle del context (namespace, user, pods)
+Abajo:     Users
+
+Incluye:
+- Drag & drop de archivos kubeconfig
+- Opcion de copiar a ~/.kube/config
+- Tema negro/amarillo
+- Iconos y textos explicativos
+- Fuentes grandes
+
+Uso:
+    python verificar_config_kubeconfig-GUI.py
+"""
+
+import os
+import sys
+import shutil
+import traceback
+
+import yaml
+from kubernetes import client, config
+from kubernetes.client.exceptions import ApiException
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QPushButton,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
+    QFileDialog,
+    QMessageBox,
+    QGroupBox,
+    QFormLayout,
+    QSplitter,
+    QFrame,
+    QSizePolicy,
+)
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont, QIcon, QDragEnterEvent, QDropEvent, QColor, QPalette, QGuiApplication
+
+
+# 1 - RUTA AL KUBECONFIG DE PRUEBA POR DEFECTO:
+DEFAULT_KUBECONFIG = os.path.join(
+    os.path.dirname(__file__), ".vscode", "test", "kubeconfig-openshift-indramind.yaml"
+)
+
+# 2 - RUTA AL KUBECONFIG DEL USUARIO (~/.kube/config):
+USER_KUBECONFIG = os.path.join(os.path.expanduser("~"), ".kube", "config")
+
+# 3 - TEMA NEGRO/AMARILLO (QSS):
+STYLESHEET = """
+QMainWindow {
+    background-color: #1a1a1a;
+}
+QWidget {
+    color: #e0e0e0;
+    font-size: 14px;
+}
+QGroupBox {
+    border: 2px solid #f5c518;
+    border-radius: 6px;
+    margin-top: 14px;
+    padding-top: 10px;
+    font-size: 15px;
+    font-weight: bold;
+    color: #f5c518;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 12px;
+    padding: 0 6px;
+}
+QPushButton {
+    background-color: #f5c518;
+    color: #1a1a1a;
+    border: none;
+    border-radius: 4px;
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: bold;
+}
+QPushButton:hover {
+    background-color: #ffd633;
+}
+QPushButton:pressed {
+    background-color: #cc9900;
+}
+QListWidget {
+    background-color: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-size: 14px;
+    padding: 4px;
+}
+QListWidget::item {
+    padding: 6px;
+    border-radius: 3px;
+}
+QListWidget::item:selected {
+    background-color: #f5c518;
+    color: #1a1a1a;
+    font-weight: bold;
+}
+QTableWidget {
+    background-color: #2a2a2a;
+    border: 1px solid #444;
+    border-radius: 4px;
+    font-size: 14px;
+    gridline-color: #444;
+}
+QTableWidget::item {
+    padding: 4px;
+}
+QHeaderView::section {
+    background-color: #f5c518;
+    color: #1a1a1a;
+    font-weight: bold;
+    border: none;
+    padding: 6px;
+}
+QLabel {
+    color: #e0e0e0;
+    font-size: 14px;
+}
+QLabel#dropzone {
+    border: 3px dashed #f5c518;
+    border-radius: 8px;
+    background-color: #2a2a2a;
+    color: #f5c518;
+    font-size: 18px;
+    font-weight: bold;
+    padding: 30px;
+    qproperty-alignment: AlignCenter;
+}
+QLabel#dropzone:hover {
+    border-color: #ffd633;
+    background-color: #333;
+}
+QLabel#status {
+    color: #f5c518;
+    font-size: 15px;
+    font-weight: bold;
+    padding: 8px;
+}
+QLabel#help {
+    color: #aaa;
+    font-size: 13px;
+    font-style: italic;
+    padding: 4px 8px;
+}
+QLabel#detail_value {
+    color: #f5c518;
+    font-size: 15px;
+    font-weight: bold;
+}
+"""
+
+
+# 4 - ICONOS (usando emojis como texto, compatibles con Windows):
+ICON_CLUSTER = "\U0001F310"   # 🌐
+ICON_CONTEXT = "\U0001F511"   # 🔑
+ICON_USER    = "\U0001F464"   # 👤
+ICON_DETAIL  = "\U0001F4CB"   # 📋
+ICON_POD     = "\U0001F4E6"   # 📦
+ICON_FILE    = "\U0001F4C1"   # 📁
+ICON_WARN    = "\u26A0\uFE0F" # ⚠️
+ICON_OK      = "\u2705"       # ✅
+ICON_INFO    = "\u2139\uFE0F" # ℹ️
+
+
+class DropZone(QLabel):
+    """Zona de drag & drop para archivos kubeconfig."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("dropzone")
+        self.setText(
+            f"{ICON_FILE}  Arrastra aqui tu archivo kubeconfig (.yaml / .yml)\n"
+            f"   o usa los botones de arriba"
+        )
+        self.setAlignment(Qt.AlignCenter)
+        self.setAcceptDrops(True)
+        self.setMinimumHeight(80)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._parent_window = None
+
+    def set_parent_window(self, window):
+        self._parent_window = window
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            self.setStyleSheet("QLabel#dropzone { border-color: #ffd633; background-color: #333; }")
+
+    def dragLeaveEvent(self, event):
+        self.setStyleSheet("")
+
+    def dropEvent(self, event: QDropEvent):
+        self.setStyleSheet("")
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        file_path = urls[0].toLocalFile()
+        if file_path and (file_path.endswith(".yaml") or file_path.endswith(".yml")):
+            if self._parent_window:
+                self._parent_window.load_kubeconfig(file_path)
+        else:
+            QMessageBox.warning(
+                self._parent_window,
+                f"{ICON_WARN} Formato no valido",
+                "Por favor arrastra un archivo .yaml o .yml",
+            )
+
+
+class KubeconfigViewerWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+
+        # 1 - CONFIGURO LA VENTANA:
+        self.setWindowTitle(f"{ICON_CLUSTER} MiniLens - Verificar kubeconfig (GUI)")
+        self.resize(1100, 800)
+
+        # 2 - APLICO EL TEMA:
+        app = QApplication.instance()
+        app.setStyleSheet(STYLESHEET)
+
+        # 3 - GUARDO EL CONFIG PARSEADO:
+        self.config = None
+        self.current_context_name = None
+
+        # 4 - WIDGET CENTRAL Y LAYOUT:
+        central = QWidget(self)
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setSpacing(10)
+
+        # 5 - BARRA SUPERIOR CON BOTONES:
+        top_bar = QHBoxLayout()
+        self.btn_load = QPushButton(f"{ICON_FILE}  Cargar kubeconfig")
+        self.btn_load.clicked.connect(self.on_load)
+        top_bar.addWidget(self.btn_load)
+
+        self.btn_load_default = QPushButton(f"{ICON_INFO}  Cargar de prueba")
+        self.btn_load_default.clicked.connect(self.on_load_default)
+        top_bar.addWidget(self.btn_load_default)
+
+        self.btn_copy_user = QPushButton(f"{ICON_USER}  Copiar a ~/.kube/config")
+        self.btn_copy_user.clicked.connect(self.on_copy_to_user_config)
+        self.btn_copy_user.setEnabled(False)
+        top_bar.addWidget(self.btn_copy_user)
+
+        top_bar.addStretch()
+        layout.addLayout(top_bar)
+
+        # 6 - ZONA DE DRAG & DROP:
+        self.dropzone = DropZone()
+        self.dropzone.set_parent_window(self)
+        layout.addWidget(self.dropzone)
+
+        # 7 - METADATOS:
+        meta_group = QGroupBox(f"{ICON_INFO}  Metadatos del kubeconfig")
+        meta_form = QFormLayout(meta_group)
+        self.lbl_file_path = QLabel("-")
+        self.lbl_file_path.setWordWrap(True)
+        self.lbl_api_version = QLabel("-")
+        self.lbl_kind = QLabel("-")
+        self.lbl_current_context = QLabel("-")
+        meta_form.addRow("Archivo:", self.lbl_file_path)
+        meta_form.addRow("apiVersion:", self.lbl_api_version)
+        meta_form.addRow("kind:", self.lbl_kind)
+        meta_form.addRow("current-context:", self.lbl_current_context)
+        layout.addWidget(meta_group)
+
+        # 8 - AREA DE 3 COLUMNAS (splitter horizontal):
+        splitter = QSplitter(Qt.Horizontal)
+
+        # 8a - COLUMNA 1: CLUSTERS:
+        col1_group = QGroupBox(f"{ICON_CLUSTER}  Clusters")
+        col1_layout = QVBoxLayout(col1_group)
+        col1_help = QLabel(
+            "Un CLUSTER es el servidor de Kubernetes al que te conectas. "
+            "Define la URL del API y los certificados de seguridad."
+        )
+        col1_help.setObjectName("help")
+        col1_help.setWordWrap(True)
+        col1_layout.addWidget(col1_help)
+        self.list_clusters = QListWidget()
+        self.list_clusters.currentItemChanged.connect(self.on_cluster_selected)
+        col1_layout.addWidget(self.list_clusters)
+        splitter.addWidget(col1_group)
+
+        # 8b - COLUMNA 2: CONTEXTS:
+        col2_group = QGroupBox(f"{ICON_CONTEXT}  Contexts")
+        col2_layout = QVBoxLayout(col2_group)
+        col2_help = QLabel(
+            "Un CONTEXT es una combinacion de CLUSTER + USER + NAMESPACE. "
+            "Es como decir \"conectate a este cluster con este usuario en este namespace\". "
+            "El current-context es el que esta activo ahora."
+        )
+        col2_help.setObjectName("help")
+        col2_help.setWordWrap(True)
+        col2_layout.addWidget(col2_help)
+        self.list_contexts = QListWidget()
+        self.list_contexts.currentItemChanged.connect(self.on_context_selected)
+        col2_layout.addWidget(self.list_contexts)
+        splitter.addWidget(col2_group)
+
+        # 8c - COLUMNA 3: DETALLE DEL CONTEXT:
+        col3_group = QGroupBox(f"{ICON_DETAIL}  Detalle del context")
+        col3_layout = QVBoxLayout(col3_group)
+
+        detail_help = QLabel(
+            "Aqui ves los datos del context seleccionado: a que namespace apunta, "
+            "con que user y a que cluster."
+        )
+        detail_help.setObjectName("help")
+        detail_help.setWordWrap(True)
+        col3_layout.addWidget(detail_help)
+
+        self.detail_form = QFormLayout()
+        self.lbl_ctx_name = QLabel("-")
+        self.lbl_ctx_namespace = QLabel("-")
+        self.lbl_ctx_user = QLabel("-")
+        self.lbl_ctx_cluster = QLabel("-")
+        for lbl in [self.lbl_ctx_name, self.lbl_ctx_namespace, self.lbl_ctx_user, self.lbl_ctx_cluster]:
+            lbl.setObjectName("detail_value")
+        self.detail_form.addRow("Context:", self.lbl_ctx_name)
+        self.detail_form.addRow("Namespace:", self.lbl_ctx_namespace)
+        self.detail_form.addRow("User:", self.lbl_ctx_user)
+        self.detail_form.addRow("Cluster:", self.lbl_ctx_cluster)
+        col3_layout.addLayout(self.detail_form)
+
+        # 3a - HEADER CON TITULO DE PODS + BOTON REFRESCAR (chico, derecha):
+        pods_header = QHBoxLayout()
+        self.lbl_pods_title = QLabel(f"{ICON_POD}  Pods del namespace:")
+        self.lbl_pods_title.setObjectName("detail_value")
+        pods_header.addWidget(self.lbl_pods_title, stretch=1)
+
+        self.btn_test_connection = QPushButton(f"{ICON_OK}")
+        self.btn_test_connection.setMaximumWidth(40)
+        self.btn_test_connection.setToolTip("Test conexion - Listar Pods")
+        self.btn_test_connection.clicked.connect(self.on_test_connection)
+        self.btn_test_connection.setEnabled(False)
+        pods_header.addWidget(self.btn_test_connection)
+        col3_layout.addLayout(pods_header)
+
+        self.table_pods = QTableWidget(0, 3)
+        self.table_pods.setHorizontalHeaderLabels(["NAME", "STATUS", "READY"])
+        self.table_pods.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        col3_layout.addWidget(self.table_pods)
+
+        # 3b - ESTADO DE CONEXION DEBAJO DE LA TABLA + BOTON COPIAR:
+        conn_status_layout = QHBoxLayout()
+        self.lbl_connection_status = QLabel("-")
+        self.lbl_connection_status.setWordWrap(True)
+        conn_status_layout.addWidget(self.lbl_connection_status, stretch=1)
+
+        self.btn_copy_error = QPushButton("Copiar")
+        self.btn_copy_error.setMaximumWidth(80)
+        self.btn_copy_error.clicked.connect(self.on_copy_error)
+        self.btn_copy_error.setVisible(False)
+        conn_status_layout.addWidget(self.btn_copy_error)
+
+        col3_layout.addLayout(conn_status_layout)
+
+        splitter.addWidget(col3_group)
+
+        # 8d - PROPORCIONES DE LAS COLUMNAS:
+        splitter.setSizes([300, 300, 450])
+        layout.addWidget(splitter, stretch=1)
+
+        # 9 - AREA INFERIOR: USERS:
+        users_group = QGroupBox(f"{ICON_USER}  Users")
+        users_layout = QVBoxLayout(users_group)
+        users_help = QLabel(
+            "Un USER define COMO te autenticas: con un token, con un certificado "
+            "cliente, o con usuario/contrasena. Los tokens se muestran enmascarados por seguridad."
+        )
+        users_help.setObjectName("help")
+        users_help.setWordWrap(True)
+        users_layout.addWidget(users_help)
+        self.table_users = QTableWidget(0, 4)
+        self.table_users.setHorizontalHeaderLabels(["Name", "Token", "Client Cert", "Auth Type"])
+        self.table_users.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        users_layout.addWidget(self.table_users)
+        layout.addWidget(users_group)
+
+        # 10 - ETIQUETA DE ESTADO:
+        self.lbl_status = QLabel(f"{ICON_WARN}  Sin kubeconfig cargado")
+        self.lbl_status.setObjectName("status")
+        self.lbl_status.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.lbl_status)
+
+    def on_load(self):
+        # 1 - ABRO EL DIALOGO PARA SELECCIONAR UN ARCHIVO:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Seleccionar kubeconfig",
+            "",
+            "Archivos YAML (*.yaml *.yml);;Todos los archivos (*)",
+        )
+        if not file_path:
+            return
+        self.load_kubeconfig(file_path)
+
+    def on_load_default(self):
+        # 1 - CARGO EL KUBECONFIG DE PRUEBA:
+        if not os.path.exists(DEFAULT_KUBECONFIG):
+            QMessageBox.warning(
+                self,
+                f"{ICON_WARN} No encontrado",
+                f"No se encontro el archivo de prueba:\n{DEFAULT_KUBECONFIG}",
+            )
+            return
+        self.load_kubeconfig(DEFAULT_KUBECONFIG)
+
+    def on_copy_to_user_config(self):
+        # 1 - VERIFICO QUE HAYA UN KUBECONFIG CARGADO:
+        if not self.config or not hasattr(self, "_loaded_file_path"):
+            return
+
+        # 2 - PREGUNTO AL USUARIO SI QUIERE COPIAR:
+        reply = QMessageBox.question(
+            self,
+            f"{ICON_INFO} Copiar kubeconfig",
+            f"Quieres copiar el kubeconfig cargado a:\n\n"
+            f"  {USER_KUBECONFIG}\n\n"
+            f"Si el archivo ya existe, se reemplazara.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 3 - CREO EL DIRECTORIO ~/.kube SI NO EXISTE:
+        kube_dir = os.path.dirname(USER_KUBECONFIG)
+        try:
+            os.makedirs(kube_dir, exist_ok=True)
+            shutil.copy2(self._loaded_file_path, USER_KUBECONFIG)
+            QMessageBox.information(
+                self,
+                f"{ICON_OK} Copiado",
+                f"Kubeconfig copiado a:\n{USER_KUBECONFIG}",
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                f"{ICON_WARN} Error",
+                f"No se pudo copiar:\n{e}",
+            )
+
+    def load_kubeconfig(self, file_path):
+        # 1 - LEO EL ARCHIVO YAML:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                self.config = yaml.safe_load(f)
+        except Exception as e:
+            QMessageBox.critical(self, f"{ICON_WARN} Error", f"No se pudo leer el archivo:\n{e}")
+            return
+
+        # 2 - GUARDO LA RUTA DEL ARCHIVO CARGADO:
+        self._loaded_file_path = file_path
+
+        # 3 - METADATOS:
+        self.lbl_file_path.setText(file_path)
+        self.lbl_api_version.setText(str(self.config.get("apiVersion", "-")))
+        self.lbl_kind.setText(str(self.config.get("kind", "-")))
+        self.current_context_name = self.config.get("current-context", "-")
+        self.lbl_current_context.setText(str(self.current_context_name))
+
+        # 4 - LIMPIO LAS LISTAS Y TABLAS:
+        self.list_clusters.clear()
+        self.list_contexts.clear()
+        self.table_pods.setRowCount(0)
+        self.table_users.setRowCount(0)
+
+        # 5 - POBLA COLUMNA 1: CLUSTERS:
+        for c in self.config.get("clusters", []):
+            name = c.get("name", "(sin nombre)")
+            item = QListWidgetItem(f"{ICON_CLUSTER}  {name}")
+            item.setData(Qt.UserRole, c)
+            self.list_clusters.addItem(item)
+
+        # 6 - POBLA AREA INFERIOR: USERS:
+        users = self.config.get("users", [])
+        self.table_users.setRowCount(len(users))
+        for i, u in enumerate(users):
+            name = u.get("name", "-")
+            user_data = u.get("user", {})
+            token = user_data.get("token", "")
+            masked = token[:8] + "..." if token else "-"
+            has_cert = "[oculto]" if user_data.get("client-certificate-data") else "-"
+            if token:
+                auth_type = "Token"
+            elif user_data.get("client-certificate-data"):
+                auth_type = "Client Certificate"
+            elif user_data.get("username"):
+                auth_type = "User/Password"
+            else:
+                auth_type = "-"
+            self.table_users.setItem(i, 0, QTableWidgetItem(f"{ICON_USER}  {name}"))
+            self.table_users.setItem(i, 1, QTableWidgetItem(masked))
+            self.table_users.setItem(i, 2, QTableWidgetItem(has_cert))
+            self.table_users.setItem(i, 3, QTableWidgetItem(auth_type))
+
+        # 7 - HABILITO EL BOTON DE COPIAR:
+        self.btn_copy_user.setEnabled(True)
+
+        # 8 - ESTADO FINAL:
+        n_clusters = len(self.config.get("clusters", []))
+        n_users = len(users)
+        n_contexts = len(self.config.get("contexts", []))
+        self.lbl_status.setText(
+            f"{ICON_OK}  Kubeconfig cargado: "
+            f"{n_clusters} cluster(s), {n_users} user(s), {n_contexts} context(s)"
+        )
+
+    def on_cluster_selected(self, current, previous):
+        # 1 - SI NO HAY ITEM SELECCIONADO, LIMPIO:
+        if not current:
+            return
+
+        # 2 - OBTENGO EL NOMBRE DEL CLUSTER SELECCIONADO (sin el icono):
+        raw_text = current.text()
+        cluster_name = raw_text.replace(f"{ICON_CLUSTER}  ", "")
+
+        # 3 - LIMPIO LA COLUMNA 2 (CONTEXTS) Y LA COLUMNA 3 (DETALLE):
+        self.list_contexts.clear()
+        self.table_pods.setRowCount(0)
+        self.lbl_ctx_name.setText("-")
+        self.lbl_ctx_namespace.setText("-")
+        self.lbl_ctx_user.setText("-")
+        self.lbl_ctx_cluster.setText("-")
+
+        # 4 - FILTRO LOS CONTEXTS QUE PERTENECEN A ESTE CLUSTER:
+        for ctx in self.config.get("contexts", []):
+            ctx_data = ctx.get("context", {})
+            if ctx_data.get("cluster") == cluster_name:
+                name = ctx.get("name", "(sin nombre)")
+                item = QListWidgetItem(f"{ICON_CONTEXT}  {name}")
+                item.setData(Qt.UserRole, ctx)
+                # 5 - MARCO EL CURRENT-CONTEXT EN NEGRITA:
+                if name == self.current_context_name:
+                    font = item.font()
+                    font.setBold(True)
+                    item.setFont(font)
+                    item.setText(f"{ICON_CONTEXT}  {name}  (actual)")
+                self.list_contexts.addItem(item)
+
+    def on_context_selected(self, current, previous):
+        # 1 - SI NO HAY ITEM SELECCIONADO, LIMPIO:
+        if not current:
+            return
+
+        # 2 - OBTENGO EL CONTEXT SELECCIONADO:
+        ctx = current.data(Qt.UserRole)
+        ctx_data = ctx.get("context", {})
+        name = ctx.get("name", "-")
+
+        # 3 - MUESTRO EL DETALLE EN LA COLUMNA 3:
+        self.lbl_ctx_name.setText(name)
+        self.lbl_ctx_namespace.setText(str(ctx_data.get("namespace", "-")))
+        self.lbl_ctx_user.setText(str(ctx_data.get("user", "-")))
+        self.lbl_ctx_cluster.setText(str(ctx_data.get("cluster", "-")))
+
+        # 4 - LIMPIO LA TABLA DE PODS Y EL TITULO:
+        self.table_pods.setRowCount(0)
+        self.lbl_connection_status.setText("-")
+        self.lbl_pods_title.setText(f"{ICON_POD}  Pods del namespace:")
+
+        # 5 - GUARDO EL CONTEXT SELECCIONADO Y HABILITO EL BOTON:
+        self.selected_context_name = name
+        self.selected_namespace = ctx_data.get("namespace", None)
+        self.btn_test_connection.setEnabled(True)
+
+        # 6 - CONECTO AUTOMATICAMENTE AL CLUSTER Y LISTO LOS PODS:
+        self.on_test_connection()
+
+    def on_copy_error(self):
+        # 1 - COPIO EL TEXTO DEL ERROR AL PORTAPAPELES:
+        text = self.lbl_connection_status.text()
+        clipboard = QGuiApplication.clipboard()
+        clipboard.setText(text)
+
+    def on_test_connection(self):
+        # 1 - VERIFICO QUE HAYA UN CONTEXT SELECCIONADO:
+        if not hasattr(self, "selected_context_name") or not self.selected_context_name:
+            return
+
+        # 2 - VERIFICO QUE HAYA UN NAMESPACE:
+        if not self.selected_namespace:
+            self.lbl_connection_status.setText(f"{ICON_WARN}  El context no tiene namespace definido")
+            return
+
+        # 3 - DESHABILITO EL BOTON Y MUESTRO ESTADO:
+        self.btn_test_connection.setEnabled(False)
+        self.lbl_connection_status.setText(f"{ICON_INFO}  Conectando al cluster...")
+        self.table_pods.setRowCount(0)
+        QApplication.processEvents()
+
+        try:
+            # 4 - CARGO EL KUBECONFIG CON EL CONTEXT SELECCIONADO:
+            #    Esto le dice al Kubernetes Python Client:
+            #    - Usa este archivo YAML como configuracion
+            #    - Usa este context (cluster + user + namespace)
+            config.load_kube_config(
+                config_file=self._loaded_file_path,
+                context=self.selected_context_name,
+            )
+
+            # 5 - CREO EL CLIENTE DE LA API CoreV1:
+            #    CoreV1Api es la API que maneja pods, services, namespaces, etc.
+            v1 = client.CoreV1Api()
+
+            # 6 - LLAMO A LA API PARA LISTAR PODS DEL NAMESPACE:
+            #    list_namespaced_pod(namespace=...) hace una peticion GET a:
+            #    /api/v1/namespaces/{namespace}/pods
+            pod_list = v1.list_namespaced_pod(namespace=self.selected_namespace)
+
+            # 7 - TRANSFORMO LA RESPUESTA (PodList) A FILAS DE LA TABLA:
+            pods = pod_list.items
+            self.table_pods.setRowCount(len(pods))
+
+            for i, pod in enumerate(pods):
+                # 7a - NOMBRE DEL POD:
+                name = pod.metadata.name
+
+                # 7b - ESTADO DEL POD (phase):
+                status = pod.status.phase if pod.status and pod.status.phase else "Unknown"
+
+                # 7c - CONTAINERS READY (ej: "1/1"):
+                if pod.status and pod.status.container_statuses:
+                    ready = sum(1 for cs in pod.status.container_statuses if cs.ready)
+                    total = len(pod.status.container_statuses)
+                    ready_str = f"{ready}/{total}"
+                else:
+                    ready_str = "-"
+
+                self.table_pods.setItem(i, 0, QTableWidgetItem(f"{ICON_POD}  {name}"))
+                self.table_pods.setItem(i, 1, QTableWidgetItem(status))
+                self.table_pods.setItem(i, 2, QTableWidgetItem(ready_str))
+
+            # 8 - MUESTRO EL RESULTADO EN EL TITULO Y DEBAJO DE LA TABLA:
+            n = len(pods)
+            self.lbl_pods_title.setText(
+                f"{ICON_POD}  Pods del namespace:  ({n})"
+            )
+            self.lbl_connection_status.setText(
+                f"{ICON_OK}  Conexion exitosa! {n} pod(s) en namespace '{self.selected_namespace}'"
+            )
+
+        except ApiException as e:
+            # 9a - ERROR DE LA API DE KUBERNETES (ej: 401, 403, 404):
+            self.lbl_connection_status.setText(
+                f"{ICON_WARN}  Error de la API (codigo {e.status}): {e.reason}"
+            )
+            self.btn_copy_error.setVisible(True)
+
+        except Exception as e:
+            # 9b - OTRO ERROR (ej: no se puede conectar al servidor):
+            self.lbl_connection_status.setText(
+                f"{ICON_WARN}  Error de conexion: {e}"
+            )
+            self.btn_copy_error.setVisible(True)
+
+        else:
+            # 10a - SI TODO SALIO BIEN, OCULTO EL BOTON DE COPIAR:
+            self.btn_copy_error.setVisible(False)
+
+        finally:
+            # 10b - REHABILITO EL BOTON:
+            self.btn_test_connection.setEnabled(True)
+
+
+def main():
+    # 1 - CREO LA APLICACION QT:
+    app = QApplication(sys.argv)
+
+    # 2 - CREO Y MUESTRO LA VENTANA:
+    window = KubeconfigViewerWindow()
+    window.show()
+
+    # 3 - EJECUTO EL EVENT LOOP:
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
