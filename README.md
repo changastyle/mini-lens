@@ -152,22 +152,34 @@ CI-CD-LOCAL\generate-minilens-exe.bat
 
 ## CI/CD - GitHub Actions
 
-El workflow `.github/workflows/build-and-release.yml` compila `MiniLens.exe` en Windows y publica un **Release** con la fecha de hoy.
+El workflow `.github/workflows/release.yml` publica un **Release** con la fecha de hoy cada vez que se pushea a `main`.
 
-### Triggers
-- **Manual**: desde la tab *Actions* en GitHub (*Run workflow*).
-- **Tag**: al pushear un tag `v*.*.*` (ej: `git tag v1.0.0 && git push origin v1.0.0`).
+**No compila en la nube.** El build se hace localmente con el `.bat`, y la GitHub Action solo toma lo que ya está en `OUT/` y lo sube al release.
+
+### Trigger
+- Al pushear a `main`.
 
 ### Que hace
-1. Checkout + Python 3.12 en `windows-latest`.
-2. Instala dependencias + `pyinstaller`.
-3. Construye `MiniLens.exe` con PyInstaller (salida en `OUT/`).
-4. Copia `minilens.db` junto al `.exe`.
-5. Comprime `OUT/MiniLens/` en un `.zip`.
-6. Crea un **Release** con tag = fecha de hoy (ej: `2026-09-04`).
-7. Sube al release:
+1. Checkout del repo.
+2. Verifica que exista `OUT/MiniLens/MiniLens.exe`.
+3. Comprime `OUT/MiniLens/` en un `.zip`.
+4. Crea un **Release** con tag = fecha de hoy (ej: `2026-09-04`).
+5. Sube al release:
    - `MiniLens-<fecha>.zip` (carpeta completa lista para usar)
    - `MiniLens.exe` (ejecutable suelto)
+
+### Flujo de trabajo
+```cmd
+# 1 - BUILD LOCAL:
+CI-CD-LOCAL\generate-minilens-exe.bat
+
+# 2 - COMMITEAR OUT/ (no esta en .gitignore):
+git add OUT/
+git commit -m "build: MiniLens.exe <fecha>"
+git push origin main
+```
+
+Al pushear a `main`, la GitHub Action crea el release automaticamente.
 
 ---
 

@@ -1,0 +1,74 @@
+# ============================================================================
+#  release.yml
+#  Al pushear a main, toma lo que hay en OUT/ y publica un Release con la fecha
+#  de hoy. NO compila en cloud - el build se hace localmente con el .bat.
+# ============================================================================
+
+name: Release
+
+# 1 - TRIGGER: al pushear a main
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 2 - CHECKOUT DEL CODIGO (incluye OUT/ porque se commitea con -f):
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 3 - VERIFICAR QUE EXISTA OUT/MiniLens/MiniLens.exe:
+      - name: Verify OUT/MiniLens/MiniLens.exe exists
+        run: |
+          if [ ! -f "OUT/MiniLens/MiniLens.exe" ]; then
+            echo "ERROR: No se encontro OUT/MiniLens/MiniLens.exe"
+            echo "Hace el build local con CI-CD-LOCAL/generate-minilens-exe.bat"
+            echo "y commitea OUT/ con: git add -f OUT/MiniLens/MiniLens.exe"
+            exit 1
+          fi
+          echo "OK: OUT/MiniLens/MiniLens.exe encontrado"
+
+      # 4 - OBTENER LA FECHA DE HOY PARA EL NOMBRE DEL RELEASE:
+      - name: Get current date
+        id: date
+        run: |
+          echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      # 5 - COMPRIMIR OUT/MiniLens EN UN ZIP:
+      - name: Zip OUT/MiniLens
+        run: |
+          cd OUT/MiniLens
+          zip -r "../MiniLens-${{ steps.date.outputs.date }}.zip" .
+          cd ../..
+          ls -la OUT/*.zip
+
+      # 6 - CREAR EL RELEASE Y SUBIR EL .exe + EL ZIP:
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.date.outputs.date }}
+          name: "MiniLens ${{ steps.date.outputs.date }}"
+          body: |
+            ## MiniLens - Build ${{ steps.date.outputs.date }}
+
+            ### Descarga
+            - **MiniLens-${{ steps.date.outputs.date }}.zip** — carpeta completa lista para usar
+            - **MiniLens.exe** — ejecutable suelto (necesita las DLLs de la carpeta)
+
+            ### Como usar
+            1. Descargar `MiniLens-${{ steps.date.outputs.date }}.zip`
+            2. Descomprimir
+            3. Ejecutar `MiniLens.exe` (doble clic)
+            4. No necesita Python ni nada instalado
+          files: |
+            OUT/MiniLens-${{ steps.date.outputs.date }}.zip
+            OUT/MiniLens/MiniLens.exe
+          draft: false
+          prerelease: false
