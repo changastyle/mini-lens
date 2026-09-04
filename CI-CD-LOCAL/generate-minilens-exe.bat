@@ -4,7 +4,9 @@ setlocal enabledelayedexpansion
 
 REM ============================================================================
 REM  GENERATE-MINILENS-EXE.BAT
-REM  Genera MiniLens.exe con PyInstaller (GUI windowed, sin consola)
+REM  Genera MiniLens.exe con PyInstaller (--onefile, GUI windowed, sin consola)
+REM  Todo (DLLs, runtime, dependencias) queda embebido en un unico .exe.
+REM  La base de datos se crea automaticamente al lado del .exe en el primer run.
 REM  Entry point: Main-GUI.py
 REM ============================================================================
 
@@ -20,7 +22,7 @@ echo.
 REM ---------------------------------------------------------------------------
 REM 2 - VERIFICAR QUE PYTHON ESTA EN EL PATH:
 REM ---------------------------------------------------------------------------
-echo [1/5] Verificando Python...
+echo [1/4] Verificando Python...
 python --version >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python no encontrado en el PATH.
@@ -34,7 +36,7 @@ REM ---------------------------------------------------------------------------
 REM 3 - CREAR/ACTIVAR VIRTUAL ENV E INSTALAR DEPENDENCIAS:
 REM ---------------------------------------------------------------------------
 echo.
-echo [2/5] Verificando virtual environment y dependencias...
+echo [2/4] Verificando virtual environment y dependencias...
 if not exist "venv\Scripts\activate.bat" (
     echo       Creando venv...
     python -m venv venv
@@ -66,9 +68,10 @@ REM ---------------------------------------------------------------------------
 REM 4 - LIMPIAR BUILDS ANTERIORES DE MINILENS:
 REM ---------------------------------------------------------------------------
 echo.
-echo [3/5] Limpiando build anterior...
+echo [3/4] Limpiando build anterior...
 if exist "build\MiniLens" rmdir /s /q "build\MiniLens"
 if exist "OUT\MiniLens" rmdir /s /q "OUT\MiniLens"
+if exist "OUT\MiniLens.exe" del /q "OUT\MiniLens.exe"
 if exist "MiniLens.spec" del /q "MiniLens.spec"
 echo       Limpieza OK
 
@@ -76,8 +79,8 @@ REM ---------------------------------------------------------------------------
 REM 5 - CONSTRUIR EL .exe CON PYINSTALLER:
 REM ---------------------------------------------------------------------------
 echo.
-echo [4/5] Construyendo MiniLens.exe...
-pyinstaller --noconfirm --windowed --name "MiniLens" ^
+echo [4/4] Construyendo MiniLens.exe (onefile)...
+pyinstaller --noconfirm --windowed --onefile --name "MiniLens" ^
     --distpath "OUT" ^
     --paths "." ^
     --add-data "ui;ui" ^
@@ -102,31 +105,23 @@ if errorlevel 1 (
 )
 
 REM ---------------------------------------------------------------------------
-REM 6 - COPIAR database/minilens.db JUNTO AL .exe (para que sea editable):
-REM ---------------------------------------------------------------------------
-echo.
-echo [5/5] Copiando database/minilens.db junto al .exe...
-if exist "database\minilens.db" (
-    if not exist "OUT\MiniLens\database" mkdir "OUT\MiniLens\database"
-    copy /y "database\minilens.db" "OUT\MiniLens\database\minilens.db" >nul 2>&1
-    echo       minilens.db copiado OK
-) else (
-    echo       Aviso: no se encontro database\minilens.db, se omitio la copia.
-)
-
-REM ---------------------------------------------------------------------------
-REM 7 - RESULTADO:
+REM 6 - RESULTADO:
 REM ---------------------------------------------------------------------------
 echo.
 echo ============================================================
-echo   BUILD COMPLETADO: MiniLens.exe
+echo   BUILD COMPLETADO: MiniLens.exe (onefile)
 echo ============================================================
 echo.
-echo   Ubicacion: OUT\MiniLens\MiniLens.exe
+echo   Ubicacion: OUT\MiniLens.exe
+echo.
+echo   El .exe es totalmente autocontenido (no necesita _internal/).
+echo   La base de datos (database\minilens.db) se crea automaticamente
+echo   al lado del .exe en el primer arranque.
 echo.
 echo   Para llevar a otra PC:
-echo     1. Copia la carpeta OUT\MiniLens\ completa
+echo     1. Copia solo OUT\MiniLens.exe
 echo     2. Ejecuta MiniLens.exe (doble clic)
 echo     3. No necesita Python ni nada instalado
+echo     4. Se crea la carpeta database\ con minilens.db automaticamente
 echo.
 pause

@@ -45,11 +45,21 @@ Esquema:
 """
 
 import os
+import sys
 import sqlite3
 import yaml
 
 # 1 - RUTA A LA BASE DE DATOS:
-DB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "database")
+#    Si la app esta empaquetada con PyInstaller (--onefile / --onedir),
+#    __file__ apunta a una carpeta temporal que se borra al cerrar.
+#    En ese caso, uso la ruta del .exe (sys.executable) para que la DB
+#    viva al lado del ejecutable y persista entre ejecuciones.
+if getattr(sys, "frozen", False):
+    _APP_DIR = os.path.dirname(sys.executable)
+else:
+    _APP_DIR = os.path.dirname(os.path.dirname(__file__))
+
+DB_DIR = os.path.join(_APP_DIR, "database")
 DB_PATH = os.path.join(DB_DIR, "minilens.db")
 
 

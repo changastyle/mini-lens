@@ -36,13 +36,11 @@ venv.bak/
 # 3 - PYINSTALLER: artefactos de build:
 #    NOTA: OUT/ NO se ignora porque se commitea para que la GitHub Action
 #    lo suba al release. Solo se ignora build/ y dist/ (legacy).
-#    Se ignora OUT/MiniLens/_internal/ (DLLs pesadas de PyInstaller).
 # ---------------------------------------------------------------------------
 build/
 dist/
 *.spec
 *.manifest
-OUT/MiniLens/_internal/
 
 # ---------------------------------------------------------------------------
 # 4 - TESTS / COBERTURA:
