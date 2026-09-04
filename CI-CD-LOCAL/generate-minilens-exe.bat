@@ -68,7 +68,7 @@ REM ---------------------------------------------------------------------------
 echo.
 echo [3/5] Limpiando build anterior...
 if exist "build\MiniLens" rmdir /s /q "build\MiniLens"
-if exist "dist\MiniLens" rmdir /s /q "dist\MiniLens"
+if exist "OUT\MiniLens" rmdir /s /q "OUT\MiniLens"
 if exist "MiniLens.spec" del /q "MiniLens.spec"
 echo       Limpieza OK
 
@@ -78,6 +78,7 @@ REM ---------------------------------------------------------------------------
 echo.
 echo [4/5] Construyendo MiniLens.exe...
 pyinstaller --noconfirm --windowed --name "MiniLens" ^
+    --distpath "OUT" ^
     --paths "." ^
     --add-data "ui;ui" ^
     --add-data "models;models" ^
@@ -106,8 +107,8 @@ REM ---------------------------------------------------------------------------
 echo.
 echo [5/5] Copiando database/minilens.db junto al .exe...
 if exist "database\minilens.db" (
-    if not exist "dist\MiniLens\database" mkdir "dist\MiniLens\database"
-    copy /y "database\minilens.db" "dist\MiniLens\database\minilens.db" >nul 2>&1
+    if not exist "OUT\MiniLens\database" mkdir "OUT\MiniLens\database"
+    copy /y "database\minilens.db" "OUT\MiniLens\database\minilens.db" >nul 2>&1
     echo       minilens.db copiado OK
 ) else (
     echo       Aviso: no se encontro database\minilens.db, se omitio la copia.
@@ -121,10 +122,10 @@ echo ============================================================
 echo   BUILD COMPLETADO: MiniLens.exe
 echo ============================================================
 echo.
-echo   Ubicacion: dist\MiniLens\MiniLens.exe
+echo   Ubicacion: OUT\MiniLens\MiniLens.exe
 echo.
 echo   Para llevar a otra PC:
-echo     1. Copia la carpeta dist\MiniLens\ completa
+echo     1. Copia la carpeta OUT\MiniLens\ completa
 echo     2. Ejecuta MiniLens.exe (doble clic)
 echo     3. No necesita Python ni nada instalado
 echo.
