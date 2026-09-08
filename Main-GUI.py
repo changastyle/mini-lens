@@ -604,11 +604,34 @@ def _split_log_line(line):
     return "", line
 
 
+def _expand_json_strings(obj, depth=0):
+    """Recorre el objeto: si un valor string es JSON valido, lo convierte.
+
+    Aplica en cualquier campo y de forma recursiva (con limite de
+    profundidad para no colgarse con estructuras raras).
+    """
+    if depth > 3:
+        return obj
+    if isinstance(obj, dict):
+        return {k: _expand_json_strings(v, depth + 1) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_json_strings(v, depth + 1) for v in obj]
+    if isinstance(obj, str):
+        t = obj.strip()
+        if (t.startswith("{") and t.endswith("}")) or (t.startswith("[") and t.endswith("]")):
+            try:
+                return _expand_json_strings(json.loads(t), depth + 1)
+            except Exception:
+                return obj
+    return obj
+
+
 def _pretty_json(text):
     """Si el texto es JSON valido (dict/list) retorna el pretty-print, sino None.
 
-    Si el JSON tiene un campo 'message' que a su vez es un string con JSON
-    anidado (patron comun de logs estructurados), lo expande tambien.
+    Si algun campo del JSON es un string con JSON anidado (patron comun de
+    logs estructurados, ej: 'message'), lo expande tambien, en cualquier
+    nivel de profundidad.
     """
     t = str(text).strip()
     if not (t.startswith("{") or t.startswith("[")):
@@ -620,14 +643,8 @@ def _pretty_json(text):
     if not isinstance(obj, (dict, list)):
         return None
 
-    # 1 - SI HAY UN CAMPO 'message' CON JSON ANIDADO, LO EXPANDO:
-    if isinstance(obj, dict) and isinstance(obj.get("message"), str):
-        inner = str(obj["message"]).strip()
-        if inner.startswith("{") or inner.startswith("["):
-            try:
-                obj["message"] = json.loads(inner)
-            except Exception:
-                pass
+    # 1 - EXPANDO CUALQUIER CAMPO QUE SEA UN STRING CON JSON ADENTRO:
+    obj = _expand_json_strings(obj, 0)
 
     try:
         return json.dumps(obj, indent=2, ensure_ascii=False)
@@ -3272,7 +3289,8 @@ class KubeconfigViewerWindow(QMainWindow):
         map_layout.addWidget(self.map_scroll, stretch=1)
 
         self.resource_tabs.addTab(map_tab, f"{ICON_SERVER}  Mapa")
-        self.resource_tabs.setCurrentIndex(1)
+        # ARRANCO EN MODO LISTA (el mapa queda como segunda pestana):
+        self.resource_tabs.setCurrentIndex(0)
 
         col3_layout.addWidget(self.resource_tabs, stretch=1)
 
@@ -3996,6 +4014,29 @@ class KubeconfigViewerWindow(QMainWindow):
         text = self.lbl_connection_status.text()
         clipboard = QGuiApplication.clipboard()
         clipboard.setText(text)
+
+    def closeEvent(self, event):
+        # 1 - CIERRE DE LA APP: corto TODOS los streams de logs vivos para
+        #     que no quede ningun thread colgado despues de cerrar:
+        try:
+            vivos = list(_LogsStreamTask._ALIVE)
+            for t in vivos:
+                t.stop()
+            if vivos:
+                _log.info("Cierre de la app: %d stream(s) de logs cortados", len(vivos))
+        except Exception:
+            pass
+
+        # 2 - VACIO LAS COLAS DE TASKS EN ESPERA Y CORTO LOS POOLS:
+        try:
+            self._api_pool.clear()
+        except Exception:
+            pass
+        try:
+            QThreadPool.globalInstance().clear()
+        except Exception:
+            pass
+        event.accept()
 
     def _identity(self):
         # 1 - ARMO LA IDENTIDAD ACTUAL: user@cluster/context
@@ -5287,15 +5328,16 @@ class _LogLineRow(QFrame):
       - new:     VERDE (lineas que llegaron DESPUES de la marcada)
     """
 
-    def __init__(self, ts, msg, on_click=None, parent=None):
+    def __init__(self, ts, msg, raw="", on_click=None, parent=None):
         super().__init__(parent)
         self.setObjectName("log_row")
         self._state = "normal"
         self._on_click = on_click
+        self._raw = raw
         self._apply_style()
         self.setCursor(Qt.PointingHandCursor)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 3, 8, 3)
+        lay.setContentsMargins(8, 3, 4, 3)
         lay.setSpacing(10)
 
         # 1 - FECHA-HORA (columna fija, amarillo, monospace):
@@ -5318,6 +5360,20 @@ class _LogLineRow(QFrame):
             " border: none; background: transparent;"
         )
         lay.addWidget(lbl_msg, stretch=1)
+
+        # 3 - BOTON PORTAPAPELES (a la derecha): copia la linea completa
+        #     (hora + mensaje) sin marcar la fila:
+        btn_copy = QPushButton(ICON_DETAIL)
+        btn_copy.setFixedSize(26, 22)
+        btn_copy.setCursor(Qt.PointingHandCursor)
+        btn_copy.setToolTip("Copiar esta linea al portapapeles (hora + mensaje)")
+        btn_copy.setStyleSheet(
+            "QPushButton { background-color: #2a2a2a; color: #f5c518;"
+            " border: 1px solid #555; border-radius: 4px; font-size: 12px; padding: 1px 6px; }"
+            "QPushButton:hover { background-color: #3d3320; border-color: #f5c518; }"
+        )
+        btn_copy.clicked.connect(lambda checked=False, text=self._raw: QGuiApplication.clipboard().setText(text))
+        lay.addWidget(btn_copy)
 
     def set_normal(self):
         # 1 - VUELVO AL ESTADO NORMAL:
@@ -5378,6 +5434,7 @@ class PodLogsDialog(QDialog):
         self._raw_lines = []
         self._n = 0
         self._marked_row = None
+        self._follow = True
 
         self.setWindowTitle(f"{ICON_LOGS}  Logs: {self._pod_name}  ({self._ns})")
         self.resize(1100, 700)
@@ -5441,6 +5498,12 @@ class PodLogsDialog(QDialog):
         self.scroll.setWidget(holder)
         layout.addWidget(self.scroll, stretch=1)
 
+        # 3a - AUTO-FOLLOW: mientras el usuario este mirando el final,
+        #      cada linea nueva empuja la vista abajo del todo. Si scrollea
+        #      hacia arriba (para leer algo), dejo de seguirlo; vuelve a
+        #      seguir cuando baje de nuevo al final:
+        self.scroll.verticalScrollBar().valueChanged.connect(self._on_scroll_moved)
+
         # 4 - ESTADO DEL STREAM:
         self.lbl_status = QLabel(f"{ICON_INFO}  Conectando al stream de logs...")
         self.lbl_status.setStyleSheet("color: #f5c518; font-size: 12px; padding: 2px;")
@@ -5503,6 +5566,13 @@ class PodLogsDialog(QDialog):
             self._task.stop()
             self._task = None
 
+    def _on_scroll_moved(self, value):
+        # 1 - ACTUALIZO EL AUTO-FOLLOW SEGUN DONDE ESTE EL USUARIO:
+        #     abajo del todo = sigo empujando la vista con cada linea nueva;
+        #     scrolleo hacia arriba = dejo de seguir (esta leyendo algo):
+        sb = self.scroll.verticalScrollBar()
+        self._follow = value >= sb.maximum() - 40
+
     def _on_container_changed(self, _idx):
         # 1 - CAMBIO DE CONTAINER: REINICIO EL STREAM:
         self._clear_rows()
@@ -5534,7 +5604,7 @@ class PodLogsDialog(QDialog):
         if pretty:
             msg = pretty
 
-        row = _LogLineRow(ts, msg)
+        row = _LogLineRow(ts, msg, raw=raw)
         row._on_click = lambda r=row: self._on_row_clicked(r)
         self.logs_layout.insertWidget(self.logs_layout.count() - 1, row)
         self._rows.append(row)
@@ -5557,10 +5627,10 @@ class PodLogsDialog(QDialog):
         while len(self._raw_lines) > self.MAX_ROWS:
             self._raw_lines.pop(0)
 
-        # 2b - AUTO-SCROLL AL FINAL (solo si el usuario esta mirando el final):
-        sb = self.scroll.verticalScrollBar()
-        at_bottom = sb.value() >= sb.maximum() - 40
-        if at_bottom:
+        # 2c - AUTO-FOLLOW: SIEMPRE ABAJO DEL TODO, salvo que el usuario
+        #      haya scrolleado para arriba o haya marcado una linea:
+        if self._follow:
+            sb = self.scroll.verticalScrollBar()
             sb.setValue(sb.maximum())
 
     def _on_status(self, s):
@@ -5588,6 +5658,10 @@ class PodLogsDialog(QDialog):
         if self._marked_row is row:
             self._unmark()
             return
+
+        # 1a - EL USUARIO ESTA MIRANDO/INTERACTUANDO: corto el auto-follow
+        #      para que las lineas nuevas no le muevan la vista:
+        self._follow = False
 
         # 2 - REINICIO: la marca anterior y las lineas "nuevas" vuelven a normal:
         for r in self._rows:
@@ -6036,7 +6110,26 @@ def main():
     window.show()
 
     # 3 - EJECUTO EL EVENT LOOP:
-    sys.exit(app.exec())
+    app.exec()
+
+    # 4 - CIERRE TOTAL: corto los streams que queden vivos, espero un
+    #     momento a que los workers terminen y FUERZO la salida (os._exit)
+    #     para que no quede ningun thread colgado ni crash de
+    #     finalizacion del interprete con QRunnables a medio correr:
+    try:
+        for t in list(_LogsStreamTask._ALIVE):
+            t.stop()
+        QThreadPool.globalInstance().clear()
+        QThreadPool.globalInstance().waitForDone(2000)
+    except Exception:
+        pass
+    try:
+        _log.info("=== MiniLens cerro limpio ===")
+        for h in _log.handlers:
+            h.flush()
+    except Exception:
+        pass
+    os._exit(0)
 
 
 if __name__ == "__main__":
