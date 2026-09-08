@@ -49,7 +49,7 @@ class MainWindow(QMainWindow):
             self,
             "Seleccionar kubeconfig",
             "",
-            "Archivos YAML (*.yaml *.yml);;Todos los archivos (*)",
+            "Todos los archivos (*);;Archivos YAML (*.yaml *.yml)",
         )
 
         # 2 - SI EL USUARIO CANCELA, NO HAGO NADA:
