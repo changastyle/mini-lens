@@ -2907,10 +2907,13 @@ class KubeconfigViewerWindow(QMainWindow):
         self.setWindowTitle(f"{ICON_CLUSTER} MiniLens - Kubernetes Explorer")
         self.resize(1500, 950)
 
-        # 1a - SETEO EL ICONO DE LA VENTANA DESDE EL SVG:
-        logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "minilens_logo.svg")
-        if os.path.exists(logo_path):
-            self.setWindowIcon(QIcon(logo_path))
+        # 1a - SETEO EL ICONO DE LA VENTANA (ico/png nuevos; svg viejo de backup):
+        base_dir = _app_base_dir()
+        for icon_name in ("minilens_icon.ico", "minilens_icon.png", "minilens_logo.svg"):
+            icon_path = os.path.join(base_dir, "assets", icon_name)
+            if os.path.exists(icon_path):
+                self.setWindowIcon(QIcon(icon_path))
+                break
 
         # 2 - APLICO EL TEMA:
         app = QApplication.instance()
@@ -3730,6 +3733,10 @@ class KubeconfigViewerWindow(QMainWindow):
                 name = ctx.get("name", "-")
                 self.selected_context_name = name
                 self.selected_namespace = ctx_data.get("namespace", None)
+                # 10a - SI HAY UN ULTIMO NAMESPACE GUARDADO PARA ESTE CONTEXT, LO USO:
+                last_ns = self._load_last_namespace(name)
+                if last_ns:
+                    self.selected_namespace = last_ns
                 self.lbl_ctx_name.setText(name)
                 self.lbl_ctx_namespace.setText(str(ctx_data.get("namespace", "-")))
                 self.lbl_ctx_user.setText(str(ctx_data.get("user", "-")))
@@ -3999,6 +4006,10 @@ class KubeconfigViewerWindow(QMainWindow):
         # 5 - GUARDO EL CONTEXT SELECCIONADO Y HABILITO EL BOTON:
         self.selected_context_name = name
         self.selected_namespace = ctx_data.get("namespace", None)
+        # 5a - SI HAY UN ULTIMO NAMESPACE GUARDADO PARA ESTE CONTEXT, LO USO:
+        last_ns = self._load_last_namespace(name)
+        if last_ns:
+            self.selected_namespace = last_ns
         self.btn_test_connection.setEnabled(True)
 
         # 6 - CONECTO AUTOMATICAMENTE AL CLUSTER Y LISTO LOS PODS:
@@ -4490,6 +4501,10 @@ class KubeconfigViewerWindow(QMainWindow):
         self.combo_namespaces.addItems(names)
         if self.selected_namespace and self.selected_namespace in names:
             self.combo_namespaces.setCurrentText(self.selected_namespace)
+        elif self.selected_namespace:
+            # 2b - SI EL NAMESPACE GUARDADO NO ESTA EN LA LISTA, LO AGREGO AL COMBO:
+            self.combo_namespaces.addItem(self.selected_namespace)
+            self.combo_namespaces.setCurrentText(self.selected_namespace)
         self._loading_namespaces = False
 
         # 3 - OCULTO EL BOTON DE COPIAR:
@@ -4511,6 +4526,28 @@ class KubeconfigViewerWindow(QMainWindow):
 
         # 5 - CARGO LOS RECURSOS DEL NAMESPACE:
         self._load_resources()
+
+    def _save_last_namespace(self):
+        # 1 - GUARDO EL ULTIMO NAMESPACE USADO PARA ESTE CONTEXT EN LA DB:
+        kc_id = getattr(self, "_current_kubeconfig_id", None)
+        ctx_name = getattr(self, "selected_context_name", None)
+        ns = getattr(self, "selected_namespace", None)
+        if not kc_id or not ctx_name or not ns:
+            return
+        try:
+            dbmod.set_context_last_namespace(kc_id, ctx_name, ns)
+        except Exception as e:
+            print(f"[MiniLens] No pude guardar el ultimo namespace: {e}")
+
+    def _load_last_namespace(self, ctx_name):
+        # 1 - DEVUELVO EL ULTIMO NAMESPACE GUARDADO PARA ESTE CONTEXT (o None):
+        kc_id = getattr(self, "_current_kubeconfig_id", None)
+        if not kc_id or not ctx_name:
+            return None
+        try:
+            return dbmod.get_context_last_namespace(kc_id, ctx_name)
+        except Exception:
+            return None
 
     def _load_resources(self):
         # 1 - VERIFICO QUE HAYA UN v1 Y UN NAMESPACE:
@@ -4569,6 +4606,9 @@ class KubeconfigViewerWindow(QMainWindow):
 
         # 2 - RECIBO PODS Y SERVICES DESDE EL THREAD:
         pods, services = data
+
+        # 2a - GUARDO EL ULTIMO NAMESPACE USADO PARA ESTE CONTEXT (persistente):
+        self._save_last_namespace()
 
         # 3 - LLENO LA TABLA DE PODS:
         self._pods_cache = {pod.metadata.name: pod for pod in pods}
@@ -6101,9 +6141,26 @@ class PodDetailWindow(QDialog):
             layout.addWidget(group)
 
 
+def _app_base_dir():
+    # 1 - CARPETA BASE PARA LOS RECURSOS (assets):
+    #     Congelado con PyInstaller --onefile los assets se extraen en _MEIPASS;
+    #     en dev, la carpeta del script:
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 def main():
     # 1 - CREO LA APLICACION QT:
     app = QApplication(sys.argv)
+
+    # 1a - ICONO DE LA APP (ventana + barra de tareas) desde assets:
+    _base = _app_base_dir()
+    for _icon_name in ("minilens_icon.ico", "minilens_icon.png", "minilens_logo.svg"):
+        _icon_path = os.path.join(_base, "assets", _icon_name)
+        if os.path.exists(_icon_path):
+            app.setWindowIcon(QIcon(_icon_path))
+            break
 
     # 2 - CREO Y MUESTRO LA VENTANA:
     window = KubeconfigViewerWindow()

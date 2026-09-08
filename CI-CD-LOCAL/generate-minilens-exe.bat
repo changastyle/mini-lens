@@ -83,6 +83,8 @@ echo [4/4] Construyendo MiniLens.exe (onefile)...
 pyinstaller --noconfirm --windowed --onefile --name "MiniLens" ^
     --distpath "OUT" ^
     --paths "." ^
+    --icon "assets\minilens_icon.ico" ^
+    --add-data "assets;assets" ^
     --add-data "ui;ui" ^
     --add-data "models;models" ^
     --add-data "database;database" ^

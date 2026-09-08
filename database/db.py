@@ -141,6 +141,13 @@ def init_db():
         if col not in existing_cols:
             cur.execute(f"ALTER TABLE clusters ADD COLUMN {col} {col_def}")
 
+    # 1g - MIGRACION: agregar columna last_namespace a contexts si no existe:
+    #      (guarda el ultimo namespace usado por context, para precargarlo
+    #      al reconectar, igual que hace OpenLens):
+    existing_ctx_cols = [row[1] for row in cur.execute("PRAGMA table_info(contexts)").fetchall()]
+    if "last_namespace" not in existing_ctx_cols:
+        cur.execute("ALTER TABLE contexts ADD COLUMN last_namespace TEXT")
+
     # 1f - COLORES POR DEFECTO si la tabla colors esta vacia:
     count = cur.execute("SELECT COUNT(*) FROM colors").fetchone()[0]
     if count == 0:
@@ -259,6 +266,30 @@ def get_contexts(kubeconfig_id):
     rows = conn.execute("SELECT * FROM contexts WHERE kubeconfig_id = ? ORDER BY id", (kubeconfig_id,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def set_context_last_namespace(kubeconfig_id, context_name, namespace):
+    """Guarda el ultimo namespace usado para un context (para precargarlo al reconectar)."""
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE contexts SET last_namespace = ? WHERE kubeconfig_id = ? AND name = ?",
+        (namespace, kubeconfig_id, context_name),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_context_last_namespace(kubeconfig_id, context_name):
+    """Retorna el ultimo namespace usado para un context (o None si nunca se guardo)."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT last_namespace FROM contexts WHERE kubeconfig_id = ? AND name = ?",
+        (kubeconfig_id, context_name),
+    ).fetchone()
+    conn.close()
+    if row and row["last_namespace"]:
+        return row["last_namespace"]
+    return None
 
 
 def get_pinned_clusters():

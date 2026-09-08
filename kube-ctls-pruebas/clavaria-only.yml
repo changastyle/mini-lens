@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Config
+clusters:
+- name: clavaria-dev
+  cluster:
+    server: https://10.24.17.161:6443
+    certificate-authority-data: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCk1JSURCVENDQWUyZ0F3SUJBZ0lJSTFtRXFPV2J4aUV3RFFZSktvWklodmNOQVFFTEJRQXdGVEVUTUJFR0ExVUUKQXhNS2EzVmlaWEp1WlhSbGN6QWVGdzB5TkRBME1qTXhNREk0TkRoYUZ3MHpOREEwTWpFeE1ETXpORGhhTUJVeApFekFSQmdOVkJBTVRDbXQxWW1WeWJtVjBaWE13Z2dFaU1BMEdDU3FHU0liM0RRRUJBUVVBQTRJQkR3QXdnZ0VLCkFvSUJBUUN6ZFdBUkdPMEY2bGpsWEJkR1Z2RFMzbElCcG1Bd0VnM0lwN3Z3bmM3NVpXUHVNVkhEdDlMekh6bGgKblF4SjZEZ05LNHdhOURQRmdycXVrUEdLa0liZlRCMHZZanpxcks3amZPelk3WHpEYkZGNmVJdUxUMEVjQ0VESQo1K0dIZWV4TkdWRUlKYXhUT2Rwc0dkaUw3Wnkwa3hVY2xYMzNlTjAraE9OK2JXMXJIZHBRMWNxOVYxall1OWdQCnhwdXBFRlV6cU4rcFlncjdjaUkxa3k4MFR2SldRUG52VEoyQzUvbmdvbVVLTDJiTXpmSy8rWm1oODcxby95KzMKMW1tUkZFSlNMQTg1UlJBeERCYUN2bnloR2tGb1N0b0QrSkRSd0FRcndQTFkzYmFyWUw1dFRYamoyc1VLdFZ1bgpPRFhmQ3pLUGFtaExQVzYxSStjK1A4dkdBT2JQQWdNQkFBR2pXVEJYTUE0R0ExVWREd0VCL3dRRUF3SUNwREFQCkJnTlZIUk1CQWY4RUJUQURBUUgvTUIwR0ExVWREZ1FXQkJUVnZhdHMzR1UzV0wzR3RDVkJ1ZDlZMDFBSWxqQVYKQmdOVkhSRUVEakFNZ2dwcmRXSmxjbTVsZEdWek1BMEdDU3FHU0liM0RRRUJDd1VBQTRJQkFRQ0x3LzJZMkpWdApvV2lQVFVBM3VuNmdzMVYxWGM0UjZaNEx1bmNVd0dKbTJmRFkwbGVDRk9PUEkvbS9HcStUV2pvMHRLTmlLeDNXClhZTWtkK1pMOHkvMy9TTm5qUjErbGRZbjNGT0NnSlJMbm96L3h0R0xRTVg1RTVvMDh6Q0xWdXE3OWVxLzU2VmcKN3pyemFmSmdQZGhWV3hPS3dFQ1JjZGJ4RnlKaUJQa0R2RitvclE0MW4vYktjMWFqU1JKVHZTNzdWNjB3KzFiUQppclF4WFVOc0toNEhPSjluZ0daYjhEWVo4RGxvQUxOc2Z3cmFXcmZRWHY1ZXJtUUdPMzZmQURLdE53KzVXQ2tiClFtNVlTdGR2WGVvSkQrdVp4RUFUTHk1Um1adEU1Yy81b0gwTmxuQWhreHhaT09RWHlrSVY0cDVOY2hzTTlvSWcKWDVPaVVqUUZlZks2Ci0tLS0tRU5EIENFUlRJRklDQVRFLS0tLS0K
+    insecure-skip-tls-verify: false
+users:
+- name: cyberdefensa-oidc
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1beta1
+      args:
+      - oidc-login
+      - get-token
+      - --oidc-issuer-url=https://auth.cyberdefense.indra.es/realms/IC
+      - --oidc-client-id=kubernetes
+      - --oidc-client-secret=zw0sa06KxIE0Aghjqjdc37aL8gRtNYzx
+      command: kubectl
+      env: null
+      interactiveMode: IfAvailable
+      provideClusterInfo: false
+contexts:
+- name: clavaria-dev
+  context:
+    cluster: clavaria-dev
+    name: clavaria-dev
+    user: cyberdefensa-oidc
+    namespace: default
+- name: clavaria-dev-cyber-battle-lab
+  context:
+    cluster: clavaria-dev
+    user: cyberdefensa-oidc
+    namespace: cyber-battle-lab
+preferences: {}
+current-context: clavaria-dev
