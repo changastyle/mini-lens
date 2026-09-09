@@ -1,7 +1,9 @@
 # MiniLens
 
-![MiniLens](readme/readme.jpg)
+![MiniLens](README/readme.jpg)
 
+Funciona el Port Forwarding!
+![alt text](README/image.png)
 Visor de **kubeconfig** con **hotbar**, **SQLite** y **vista grafica** de Pods / Services para Kubernetes.
 
 Estilo **OpenLens**: barra lateral izquierda con clusters anclados, tema negro/amarillo, drag & drop de archivos y un mapa grafico de Services + Pods.

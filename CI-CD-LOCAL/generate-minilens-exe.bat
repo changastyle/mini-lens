@@ -7,7 +7,7 @@ REM  GENERATE-MINILENS-EXE.BAT
 REM  Genera MiniLens.exe con PyInstaller (--onefile, GUI windowed, sin consola)
 REM  Todo (DLLs, runtime, dependencias) queda embebido en un unico .exe.
 REM  La base de datos se crea automaticamente al lado del .exe en el primer run.
-REM  Entry point: Main-GUI.py
+REM  Entry point: MiniLens-GUI.py
 REM ============================================================================
 
 REM 1 - EL .bat ESTA EN CI-CD-LOCAL/ PERO LOS ARCHIVOS DEL PROYECTO ESTAN ARRIBA:
@@ -99,7 +99,7 @@ pyinstaller --noconfirm --windowed --onefile --name "MiniLens" ^
     --hidden-import "kubernetes.config" ^
     --hidden-import "kubernetes.client.exceptions" ^
     --hidden-import "yaml" ^
-    Main-GUI.py
+    MiniLens-GUI.py
 if errorlevel 1 (
     echo ERROR: Fallo el build de MiniLens.
     pause
