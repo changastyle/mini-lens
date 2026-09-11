@@ -118,9 +118,11 @@ from PySide6.QtWidgets import (
     QComboBox,
     QRadioButton,
     QCheckBox,
+    QSystemTrayIcon,
+    QMenu,
 )
 from PySide6.QtCore import Qt, QPoint, QRect, QSize, QMimeData, QObject, QRunnable, QThreadPool, Signal, QTimer, QProcess
-from PySide6.QtGui import QFont, QIcon, QDrag, QDragEnterEvent, QDropEvent, QColor, QPalette, QGuiApplication, QPainter, QBrush, QPen, QFontMetrics
+from PySide6.QtGui import QFont, QIcon, QDrag, QDragEnterEvent, QDropEvent, QColor, QPalette, QGuiApplication, QPainter, QBrush, QPen, QFontMetrics, QPixmap
 import random
 import time
 import webbrowser
@@ -357,6 +359,7 @@ ICON_REFRESH  = "\U0001F504"  # 🔄 (refrescar recursos)
 ICON_PING     = "\U0001F3D3"  # 🏓 (ping TCP)
 ICON_PLUS     = "\u2795"      # ➕ (agregar)
 ICON_LOGS     = "\U0001F4DC"  # 📜 (logs del pod)
+ICON_INGRESS  = "\U0001F310"  # 🌐 (ingress: routing HTTP)
 
 # 5b - PALETA DE COLORES PARA HOTBAR ITEMS:
 HOTBAR_COLORS = [
@@ -2964,6 +2967,9 @@ class KubeconfigViewerWindow(QMainWindow):
         self._current_contexts = []
         self._error_log = []
         self._pf_panel = None
+        self._ingress_manager = None
+        self._ingress_panel = None
+        self._ingress_panel_remote = None
 
         # 1b - GESTOR DE PORT FORWARDS (kubectl port-forward con reconexion):
         self.pf_manager = PortForwardManager(self)
@@ -3366,11 +3372,26 @@ class KubeconfigViewerWindow(QMainWindow):
         self.btn_copy_error.setVisible(False)
         conn_status_layout.addWidget(self.btn_copy_error)
 
-        # BOTON CONEXIONES ABIERTAS: abre el panel de port forwards:
-        self.btn_port_forwards = QPushButton(f"{ICON_PORT}  Conexiones abiertas (0)")
+        # BOTON PORT FORWARDINGS: abre el panel de port forwards activos:
+        self.btn_port_forwards = QPushButton(f"{ICON_PORT}  Port Forwardings (0)")
         self.btn_port_forwards.setToolTip("Ver los port forwards activos (tuneles abiertos)")
         self.btn_port_forwards.clicked.connect(self.on_open_port_forwards)
         conn_status_layout.addWidget(self.btn_port_forwards)
+
+        # BOTON INGRESSES: abre el panel de ingresses que MiniLens crea en esta sesion:
+        self.btn_ingresses = QPushButton(f"{ICON_INGRESS}  Ingresses (0)")
+        self.btn_ingresses.setToolTip("Listar, crear y borrar ingresses del namespace actual")
+        self.btn_ingresses.clicked.connect(self.on_open_ingresses)
+        conn_status_layout.addWidget(self.btn_ingresses)
+
+        # BOTON INGRESSES REMOTOS: abre el panel con TODOS los ingresses
+        # que ya existen en el cluster remoto (para enganchar tu PC a ellos):
+        self.btn_ingresses_remote = QPushButton(f"{ICON_INGRESS}  Ingresses del cluster")
+        self.btn_ingresses_remote.setToolTip(
+            "Ver los ingresses que ya existen en el cluster y enganchar tu PC al host"
+        )
+        self.btn_ingresses_remote.clicked.connect(self.on_open_ingresses_remote)
+        conn_status_layout.addWidget(self.btn_ingresses_remote)
 
         # BOTON DE LOG DE ERRORES: abre un dialogo con el detalle de todos
         # los errores (API/conexion) registrados en la sesion:
@@ -3404,6 +3425,113 @@ class KubeconfigViewerWindow(QMainWindow):
         self._overlay_resources = _LoadingOverlay(self.resource_tabs)
         self._overlay_contexts.hide()
         self._overlay_resources.hide()
+
+        # 15 - TRAY ICON (bolita amarilla): la X de la ventana solo oculta
+        #     la UI y deja vivos los port-forwards; para cerrar de verdad
+        #     hay que usar "Exit and close port forwarding" del menu del tray:
+        self._setup_tray_icon()
+
+    def _make_tray_icon_pixmap(self, pf_count=0, ing_count=0):
+        # 1 - GENERO LA BOLITA AMARILLA (#f5c518, mismo amarillo que los badges):
+        #     64x64 con borde oscuro. Muestra el conteo de port-forwards e
+        #     ingresses adentro (formato "pf/ing" o solo "pf" si ing==0):
+        pix = QPixmap(64, 64)
+        pix.fill(Qt.transparent)
+        p = QPainter(pix)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        # 1a - BOLITA AMARILLA DE 64x64 (ocupa todo el canvas):
+        p.setPen(QPen(QColor("#1a1a1a"), 3))
+        p.setBrush(QBrush(QColor("#f5c518")))
+        p.drawEllipse(2, 2, 60, 60)
+        # 1b - TEXTO ADENTRO (negro, centrado):
+        #     - si pf=0 e ing=0: bolita lisa (sin texto)
+        #     - si ing=0: solo el numero de pf (ej: "1")
+        #     - si ing>0: formato "pf/ing" (ej: "1/1", "0/1")
+        if pf_count > 0 or ing_count > 0:
+            p.setPen(QPen(QColor("#1a1a1a")))
+            font = QFont()
+            font.setBold(True)
+            if ing_count > 0:
+                txt = f"{pf_count}/{ing_count}"
+            else:
+                txt = str(pf_count)
+            # 1c - TAMANO DE FUENTE SEGUN LARGO DEL TEXTO:
+            largo = len(txt)
+            if largo <= 1:
+                font.setPixelSize(38)
+            elif largo == 2:
+                font.setPixelSize(32)
+            elif largo == 3:
+                font.setPixelSize(26)
+            else:
+                font.setPixelSize(20)
+            p.setFont(font)
+            metrics = QFontMetrics(font)
+            w = metrics.horizontalAdvance(txt)
+            h = metrics.ascent()
+            # 1d - CENTRO EL TEXTO EN LA BOLITA:
+            p.drawText((64 - w) // 2, (64 + h) // 2 - 4, txt)
+        p.end()
+        return pix
+
+    def _setup_tray_icon(self):
+        # 1 - CREO EL TRAY ICON CON LA BOLITA AMARILLA:
+        self._tray_icon = QSystemTrayIcon(QIcon(self._make_tray_icon_pixmap()), self)
+        self._tray_icon.setToolTip("MiniLens - port forwards activos")
+        self._tray_icon.activated.connect(self._on_tray_activated)
+
+        # 2 - MENU DEL TRAY: mostrar la ventana o cerrar todo de verdad:
+        menu = QMenu(self)
+        act_show = menu.addAction("Mostrar MiniLens")
+        act_show.triggered.connect(self._tray_show_window)
+        menu.addSeparator()
+        act_exit = menu.addAction("Exit and close port forwarding")
+        act_exit.triggered.connect(self._real_quit)
+        self._tray_icon.setContextMenu(menu)
+
+        # 3 - SOLO MUESTRO EL TRAY SI EL SISTEMA LO SOPORTA:
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self._tray_icon.show()
+
+    def _on_tray_activated(self, reason):
+        # 1 - DOBLE CLIC / CLIC EN LA BOLITA = MUESTRO LA VENTANA:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._tray_show_window()
+
+    def _tray_show_window(self):
+        # 1 - RESTAURO LA VENTANA (si estaba oculta por la X):
+        self.show()
+        self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+        self.raise_()
+        self.activateWindow()
+
+    def _real_quit(self):
+        # 1 - CIERRE REAL: corto streams, mato port-forwards, vacio pools
+        #     y salgo de la app (esto es lo que hacia la X antes del tray):
+        try:
+            vivos = list(_LogsStreamTask._ALIVE)
+            for t in vivos:
+                t.stop()
+        except Exception:
+            pass
+        try:
+            self.pf_manager.shutdown()
+        except Exception:
+            pass
+        try:
+            self._api_pool.clear()
+        except Exception:
+            pass
+        try:
+            QThreadPool.globalInstance().clear()
+        except Exception:
+            pass
+        # 1a - OCULTO EL TRAY Y CIERRO LA VENTANA PARA QUE EL EVENT LOOP TERMINE:
+        try:
+            self._tray_icon.hide()
+        except Exception:
+            pass
+        QApplication.quit()
 
     def _spinner_start(self, which, text="Cargando..."):
         # 1 - MUESTRO EL SPINNER SOBRE EL AREA INDICADA:
@@ -4089,41 +4217,80 @@ class KubeconfigViewerWindow(QMainWindow):
         clipboard.setText(text)
 
     def closeEvent(self, event):
-        # 1 - CIERRE DE LA APP: corto TODOS los streams de logs vivos para
-        #     que no quede ningun thread colgado despues de cerrar:
+        # 1 - LA X SOLO OCULTA LA UI: los port-forwards siguen vivos mientras
+        #     exista el tray icon (bolita amarilla). Para cerrar todo de
+        #     verdad hay que usar "Exit and close port forwarding" del menu
+        #     del tray (eso llama a _real_quit):
+        # 1a - CORTO LOS STREAMS DE LOGS VIVOS (consumen recursos y no
+        #      tienen sentido con la UI oculta), pero NO toco los port-forwards:
         try:
             vivos = list(_LogsStreamTask._ALIVE)
             for t in vivos:
                 t.stop()
             if vivos:
-                _log.info("Cierre de la app: %d stream(s) de logs cortados", len(vivos))
+                _log.info("UI ocultada (tray): %d stream(s) de logs cortados", len(vivos))
         except Exception:
             pass
 
-        # 1a - MATO TODOS LOS kubectl port-forward (si no quedan colgados):
+        # 1b - SI HAY FORWARDS ACTIVOS, AVISO EN EL TRAY Y OCULTO LA VENTANA:
+        n_pf = 0
         try:
-            self.pf_manager.shutdown()
+            n_pf = len([e for e in self.pf_manager.entries() if e["enabled"]])
         except Exception:
             pass
+        if n_pf > 0:
+            try:
+                self._tray_icon.showMessage(
+                    "MiniLens sigue corriendo",
+                    f"La ventana se cerro pero hay {n_pf} port-forward(s) activo(s).\n"
+                    "Usa 'Exit and close port forwarding' en el tray para cerrar todo.",
+                    QSystemTrayIcon.Information, 4000,
+                )
+            except Exception:
+                pass
 
-        # 2 - VACIO LAS COLAS DE TASKS EN ESPERA Y CORTO LOS POOLS:
-        try:
-            self._api_pool.clear()
-        except Exception:
-            pass
-        try:
-            QThreadPool.globalInstance().clear()
-        except Exception:
-            pass
-        event.accept()
+        # 2 - OCULTO LA VENTANA E IMPIDO EL CIERRE REAL (event.ignore):
+        self.hide()
+        event.ignore()
 
     def _on_pf_updated(self):
-        # 1 - ACTUALIZO EL BOTON CON LA CANTIDAD DE FORWARDS ACTIVOS:
+        # 1 - ACTUALIZO EL BOTON Y EL ICONO DEL TRAY CON LA CANTIDAD
+        #     DE FORWARDS ACTIVOS + INGRESSES DEL NAMESPACE (la bolita
+        #     muestra "pf/ing" adentro):
         try:
-            n = len([e for e in self.pf_manager.entries() if e["enabled"]])
-            self.btn_port_forwards.setText(f"{ICON_PORT}  Conexiones abiertas ({n})")
+            n_pf = len([e for e in self.pf_manager.entries() if e["enabled"]])
+            self.btn_port_forwards.setText(f"{ICON_PORT}  Port Forwardings ({n_pf})")
+            # 1a - CUENTO LOS INGRESSES QUE MINILENS CREO EN ESTA SESION:
+            n_ing = self._count_ingresses()
+            self.btn_ingresses.setText(f"{ICON_INGRESS}  Ingresses ({n_ing})")
+            if getattr(self, "_tray_icon", None):
+                self._tray_icon.setIcon(
+                    QIcon(self._make_tray_icon_pixmap(n_pf, n_ing))
+                )
+                # 1b - TOOLTIP CON EL DETALLE:
+                parts = [f"{n_pf} port-forward(s)"]
+                if n_ing > 0:
+                    parts.append(f"{n_ing} ingress(es)")
+                self._tray_icon.setToolTip("MiniLens - " + " + ".join(parts))
         except Exception:
             pass
+
+    def _ensure_ingress_manager(self):
+        # 1 - CREO EL IngressManager SI NO EXISTE Y LO CONECTO AL TRAY:
+        if getattr(self, "_ingress_manager", None) is None:
+            self._ingress_manager = IngressManager(self)
+            self._ingress_manager.updated.connect(self._on_pf_updated)
+        return self._ingress_manager
+
+    def _count_ingresses(self):
+        # 1 - CUENTO LOS INGRESSES QUE MINILENS CREO EN ESTA SESION
+        #     (no todos los del namespace):
+        try:
+            if getattr(self, "_ingress_manager", None) is None:
+                return 0
+            return len(self._ingress_manager.entries())
+        except Exception:
+            return 0
 
     def on_open_port_forwards(self):
         # 1 - ABRO (O TRAIGO AL FRENTE) EL PANEL DE CONEXIONES ABIERTAS:
@@ -4153,6 +4320,124 @@ class KubeconfigViewerWindow(QMainWindow):
             self.start_port_forward(pod, pod_port, local_port, https, open_browser)
         except Exception as e:
             QMessageBox.critical(self, f"{ICON_WARN} Port Forward", f"No se pudo iniciar el tunnel:\n{e}")
+
+    def on_open_ingresses(self):
+        # 1 - ABRO (O TRAIGO AL FRENTE) EL PANEL DE INGRESSES:
+        #     Necesita un namespace seleccionado y la API conectada:
+        ns = getattr(self, "selected_namespace", None)
+        if not ns:
+            QMessageBox.information(
+                self,
+                f"{ICON_INFO} Sin namespace",
+                "Conectate a un cluster y selecciona un namespace primero.",
+            )
+            return
+        if getattr(self, "_v1", None) is None:
+            QMessageBox.information(
+                self,
+                f"{ICON_INFO} Sin conexion",
+                "Conectate a un cluster primero.",
+            )
+            return
+        self._ensure_ingress_manager()
+        if getattr(self, "_ingress_panel", None) is None:
+            self._ingress_panel = IngressPanel(
+                self._ingress_manager, ns, self,
+                new_ingress_cb=self._ingress_new,
+                services=list(getattr(self, "_services_cache", []) or []),
+                on_change_cb=self._on_pf_updated,
+            )
+        else:
+            # 1a - SI YA EXISTE, ACTUALIZO EL NAMESPACE Y LOS SERVICES:
+            self._ingress_panel._namespace = ns
+            self._ingress_panel._services = list(getattr(self, "_services_cache", []) or [])
+        self._ingress_panel.setWindowTitle(f"{ICON_INGRESS}  Ingresses - {ns}")
+        self._ingress_panel._refresh()
+        self._ingress_panel.show()
+        self._ingress_panel.raise_()
+        self._ingress_panel.activateWindow()
+
+    def on_open_ingresses_remote(self):
+        # 1 - ABRO (O TRAIGO AL FRENTE) EL PANEL DE INGRESSES REMOTOS
+        #     (los que ya existen en el cluster, para enganchar mi PC):
+        ns = getattr(self, "selected_namespace", None)
+        if not ns:
+            QMessageBox.information(
+                self,
+                f"{ICON_INFO} Sin namespace",
+                "Conectate a un cluster y selecciona un namespace primero.",
+            )
+            return
+        if getattr(self, "_v1", None) is None:
+            QMessageBox.information(
+                self,
+                f"{ICON_INFO} Sin conexion",
+                "Conectate a un cluster primero.",
+            )
+            return
+        self._ensure_ingress_manager()
+        if getattr(self, "_ingress_panel_remote", None) is None:
+            self._ingress_panel_remote = RemoteIngressPanel(
+                self._ingress_manager, ns, self,
+            )
+        else:
+            self._ingress_panel_remote._namespace = ns
+        self._ingress_panel_remote.setWindowTitle(f"{ICON_INGRESS}  Ingresses del cluster - {ns}")
+        self._ingress_panel_remote._refresh()
+        self._ingress_panel_remote.show()
+        self._ingress_panel_remote.raise_()
+        self._ingress_panel_remote.activateWindow()
+
+    def _ingress_new(self):
+        # 1 - DIALOGO PARA CREAR UN INGRESS NUEVO:
+        ns = getattr(self, "selected_namespace", None)
+        if not ns:
+            QMessageBox.information(self, f"{ICON_INFO} Sin namespace",
+                                    "Selecciona un namespace primero.")
+            return
+        services = list(getattr(self, "_services_cache", []) or [])
+        if not services:
+            QMessageBox.information(self, f"{ICON_INFO} Sin services",
+                                    "No hay services cargados. Carga los recursos primero.")
+            return
+        # 1a - DETECTO LAS INGRESS CLASSES DEL CLUSTER (nginx, traefik, etc.):
+        classes = []
+        try:
+            classes = self._ensure_ingress_manager().list_ingress_classes()
+        except Exception:
+            pass
+        # 2 - ABRO EL DIALOGO:
+        dlg = IngressDialog(services, ns, classes, self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        name, host, svc_name, svc_port, ic_class, path, tls = dlg.values()
+        if not name or not host or not svc_name:
+            return
+        # 3 - CREO EL INGRESS EN EL CLUSTER:
+        # 3a - RESUELVO LA IP DEL INGRESS CONTROLLER PARA LA LINEA DEL HOSTS:
+        ip = _get_ingress_controller_ip()
+        try:
+            self._ingress_manager.create_ingress(
+                namespace=ns, name=name, host=host,
+                service_name=svc_name, service_port=svc_port,
+                ingress_class=ic_class, path=path, tls=tls,
+            )
+            # 1 - MUESTRO EL INGRESS CREADO + LINEA DEL HOSTS PARA COPIAR:
+            QMessageBox.information(
+                self, f"{ICON_OK} Ingress creado",
+                f"Ingress '{name}' creado en {ns}.\n"
+                f"Host: {host} -> {svc_name}:{svc_port}\n\n"
+                f"Linea para el hosts de Windows (copiar y pegar):\n"
+                f"{ip} {host}",
+            )
+        except Exception as e:
+            # 1a - SI FALLO, IGUAL MUESTRO LA LINEA DEL HOSTS PARA COPIAR:
+            QMessageBox.critical(
+                self, f"{ICON_WARN} Ingress",
+                f"No se pudo crear el ingress:\n{e}\n\n"
+                f"Linea para el hosts de Windows (copiar y pegar):\n"
+                f"{ip} {host}",
+            )
 
     def start_port_forward(self, pod, pod_port, local_port=None, https=False, open_browser=False):
         # 1 - LANZO EL TUNEL CON EL KUBECONFIG Y CONTEXT ACTUALES:
@@ -4968,7 +5253,8 @@ class KubeconfigViewerWindow(QMainWindow):
                 "QPushButton:hover { background-color: #ffd633; }"
             )
             b.clicked.connect(
-                lambda checked, h=list(hijos), port=pod_port: self._forward_service_port(h, port)
+                lambda checked, s=svc, sp=int(p.port), h=list(hijos), pp=pod_port:
+                    self._open_service_port_dialog(s, sp, h, pp)
             )
             lay.addWidget(b)
         lay.addStretch()
@@ -4994,9 +5280,11 @@ class KubeconfigViewerWindow(QMainWindow):
         # 3 - SINO USO EL PORT DEL SERVICE:
         return int(svc_port.port)
 
-    def _forward_service_port(self, hijos, port):
-        # 1 - POPUP PARA DAR DE ALTA EL FORWARD DE ESTE PUERTO DEL SERVICE:
-        #     (sin combobox de puerto: el puerto ya viene del badge clickeado)
+    def _open_service_port_dialog(self, svc, svc_port, hijos, pod_port):
+        # 1 - POPUP CON 2 TABS: Port Forwarding e Ingress.
+        #     Se abre al clickear un badge de puerto de un service.
+        #     svc_port = puerto del service (ej 80), pod_port = puerto del pod
+        #     (ej 8080, resuelto desde targetPort).
         if not hijos:
             QMessageBox.information(
                 self,
@@ -5004,14 +5292,52 @@ class KubeconfigViewerWindow(QMainWindow):
                 "Este service no tiene pods asociados: no se puede forwardear.",
             )
             return
-        dlg = PortForwardDialog(hijos, self, fixed_port=port)
+        ns = svc.metadata.namespace or getattr(self, "selected_namespace", "") or "default"
+        # 1a - DETECTO LAS INGRESS CLASSES DEL CLUSTER (nginx, traefik, etc.):
+        classes = []
+        try:
+            classes = self._ensure_ingress_manager().list_ingress_classes()
+        except Exception:
+            pass
+        # 2 - ABRO EL DIALOG CON TABS:
+        dlg = ServicePortDialog(svc, svc_port, hijos, pod_port, ns, classes, self)
         if dlg.exec() != QDialog.Accepted:
             return
-        pod, pod_port, local_port, https, open_browser = dlg.values()
-        try:
-            self.start_port_forward(pod, pod_port, local_port, https, open_browser)
-        except Exception as e:
-            QMessageBox.critical(self, f"{ICON_WARN} Port Forward", f"No se pudo iniciar el tunnel:\n{e}")
+        mode, vals = dlg.values()
+        # 3 - SEGUN EL TAB ACTIVO, LANZO PORT FORWARD O CREO INGRESS:
+        if mode == "pf":
+            pod, p_port, local_port, https, open_browser = vals
+            try:
+                self.start_port_forward(pod, p_port, local_port, https, open_browser)
+            except Exception as e:
+                QMessageBox.critical(self, f"{ICON_WARN} Port Forward",
+                                     f"No se pudo iniciar el tunnel:\n{e}")
+        elif mode == "ingress":
+            name, host, s_name, s_port, ic_class, path, tls = vals
+            # 1 - RESUELVO LA IP DEL INGRESS CONTROLLER PARA LA LINEA DEL HOSTS:
+            ip = _get_ingress_controller_ip()
+            try:
+                self._ensure_ingress_manager().create_ingress(
+                    namespace=ns, name=name, host=host,
+                    service_name=s_name, service_port=s_port,
+                    ingress_class=ic_class, path=path, tls=tls,
+                )
+                # 1 - MUESTRO EL INGRESS CREADO + LINEA DEL HOSTS PARA COPIAR:
+                QMessageBox.information(
+                    self, f"{ICON_OK} Ingress creado",
+                    f"Ingress '{name}' creado en {ns}.\n"
+                    f"Host: {host} -> {s_name}:{s_port}\n\n"
+                    f"Linea para el hosts de Windows (copiar y pegar):\n"
+                    f"{ip} {host}",
+                )
+            except Exception as e:
+                # 1a - SI FALLO, IGUAL MUESTRO LA LINEA DEL HOSTS PARA COPIAR:
+                QMessageBox.critical(
+                    self, f"{ICON_WARN} Ingress",
+                    f"No se pudo crear el ingress:\n{e}\n\n"
+                    f"Linea para el hosts de Windows (copiar y pegar):\n"
+                    f"{ip} {host}",
+                )
 
     def _filter_resource_tree(self, text):
         # 1 - FILTRO EL ARBOL POR TEXTO (matchea el nombre del service y de los pods):
@@ -6279,7 +6605,7 @@ class PortForwardPanel(QDialog):
         super().__init__(parent)
         self._manager = manager
         self._new_cb = new_forward_cb
-        self.setWindowTitle(f"{ICON_PORT}  Conexiones abiertas (Port Forwarding)")
+        self.setWindowTitle(f"{ICON_PORT}  Port Forwardings")
         self.resize(780, 380)
 
         lay = QVBoxLayout(self)
@@ -6464,6 +6790,913 @@ class PortForwardDialog(QDialog):
             self.chk_https.isChecked(),
             self.chk_browser.isChecked(),
         )
+
+
+class ServicePortDialog(QDialog):
+    """Dialog con 2 tabs que se abre al clickear un badge de puerto de un
+    service:
+      - Tab 'Port Forwarding': elige pod + puerto local + opciones (igual que
+        PortForwardDialog pero embebido en el tab).
+      - Tab 'Ingress': crea un ingress apuntando al service/puerto elegido,
+        con deteccion de ingress class y opcion de agregar al hosts de Windows.
+    """
+
+    def __init__(self, svc, svc_port, pods, pod_port, namespace,
+                 ingress_classes, parent=None):
+        super().__init__(parent)
+        self._svc = svc
+        self._svc_port = int(svc_port)   # puerto del service (ej 80)
+        self._pods = pods
+        self._pod_port = int(pod_port)   # puerto del pod (ej 8080)
+        self._namespace = namespace
+        self._ingress_classes = ingress_classes or []
+
+        svc_name = svc.metadata.name
+        self.setWindowTitle(f"{ICON_PORT}  {svc_name}:{svc_port}")
+        self.resize(500, 420)
+
+        lay = QVBoxLayout(self)
+
+        # 1 - INFO DEL SERVICE ARRIBA (nombre + puerto service + puerto pod):
+        info = QLabel(
+            f"Service: <b>{svc_name}</b>  |  Puerto service: <b>{svc_port}</b>"
+            + (f"  |  Puerto pod: <b>{pod_port}</b>" if pod_port != int(svc_port) else "")
+        )
+        lay.addWidget(info)
+
+        # 2 - TABS:
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._build_pf_tab(), f"{ICON_PORT}  Port Forwarding")
+        self._tabs.addTab(self._build_ingress_tab(), f"{ICON_INGRESS}  Ingress")
+        lay.addWidget(self._tabs)
+
+        # 3 - BOTONES:
+        btns = QHBoxLayout()
+        btns.addStretch()
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        self._btn_ok = QPushButton("Iniciar")
+        self._btn_ok.clicked.connect(self._on_accept)
+        btns.addWidget(btn_cancel)
+        btns.addWidget(self._btn_ok)
+        lay.addLayout(btns)
+
+        # 4 - CAMBIO EL LABEL DEL BOTON SEGUN EL TAB ACTIVO:
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
+    def _build_pf_tab(self):
+        # 1 - TAB PORT FORWARDING: elige pod + puerto local + opciones:
+        tab = QWidget()
+        form = QFormLayout(tab)
+
+        # 1a - POD (combo si hay varios, label fijo si hay uno solo):
+        self._pf_combo_pod = QComboBox()
+        for p in sorted(self._pods, key=lambda x: x.metadata.name):
+            self._pf_combo_pod.addItem(p.metadata.name, p)
+        if len(self._pods) == 1:
+            self._pf_combo_pod.setVisible(False)
+            form.addRow("Pod:", QLabel(f"{ICON_POD}  {self._pods[0].metadata.name}"))
+        else:
+            form.addRow("Pod:", self._pf_combo_pod)
+
+        # 1b - PUERTO DEL POD (fijo, viene del badge):
+        form.addRow("Puerto del pod:", QLabel(f"{ICON_PORT}  {self._pod_port}"))
+
+        # 1c - PUERTO LOCAL:
+        self._pf_txt_local = QLineEdit()
+        self._pf_txt_local.setPlaceholderText("Random")
+        form.addRow("Puerto local:", self._pf_txt_local)
+
+        # 1d - OPCIONES:
+        self._pf_chk_https = QCheckBox("https")
+        self._pf_chk_browser = QCheckBox("Abrir en navegador")
+        self._pf_chk_browser.setChecked(True)
+        form.addRow("", self._pf_chk_https)
+        form.addRow("", self._pf_chk_browser)
+        return tab
+
+    def _build_ingress_tab(self):
+        # 1 - TAB INGRESS: crea un ingress apuntando al service/puerto:
+        tab = QWidget()
+        form = QFormLayout(tab)
+
+        svc_name = self._svc.metadata.name
+
+        # 1a - NOMBRE DEL INGRESS (sugerido):
+        self._ing_txt_name = QLineEdit(f"{svc_name}-ingress")
+        form.addRow("Nombre:", self._ing_txt_name)
+
+        # 1b - SERVICE (fijo, viene del badge):
+        form.addRow("Service:", QLabel(f"{ICON_INGRESS}  {svc_name}"))
+
+        # 1c - PUERTO DEL SERVICE (fijo, viene del badge):
+        form.addRow("Puerto service:", QLabel(f"{ICON_PORT}  {self._svc_port}"))
+
+        # 1d - HOSTNAME (sugerido):
+        self._ing_txt_host = QLineEdit(f"{svc_name}.local")
+        form.addRow("Hostname:", self._ing_txt_host)
+
+        # 1e - INGRESS CLASS (combo con las classes detectadas):
+        self._ing_combo_class = QComboBox()
+        if self._ingress_classes:
+            for ic in self._ingress_classes:
+                self._ing_combo_class.addItem(ic)
+        else:
+            # 1e1 - SI NO HAY CLASSES DETECTADAS, OFREZCO LAS COMUNES:
+            self._ing_combo_class.addItems(["nginx", "traefik"])
+        form.addRow("Ingress class:", self._ing_combo_class)
+
+        # 1f - PATH:
+        self._ing_txt_path = QLineEdit("/")
+        form.addRow("Path:", self._ing_txt_path)
+
+        # 1g - TLS:
+        self._ing_chk_tls = QCheckBox("Habilitar TLS (crea secret {name}-tls)")
+        form.addRow("", self._ing_chk_tls)
+
+        # 1h - AGREGAR AL HOSTS DE WINDOWS:
+        self._ing_chk_hosts = QCheckBox("Agregar al hosts de Windows (127.0.0.1 hostname)")
+        self._ing_chk_hosts.setChecked(True)
+        form.addRow("", self._ing_chk_hosts)
+        return tab
+
+    def _on_tab_changed(self, idx):
+        # 1 - CAMBIO EL LABEL DEL BOTON SEGUN EL TAB:
+        self._btn_ok.setText("Iniciar" if idx == 0 else "Crear")
+
+    def _on_accept(self):
+        # 1 - SEGUN EL TAB ACTIVO, VALIDO Y ACEPTO:
+        idx = self._tabs.currentIndex()
+        if idx == 0:
+            # 1a - PORT FORWARDING: no hay validacion extra (pod y puerto ya fijos):
+            self.accept()
+        else:
+            # 1b - INGRESS: valido nombre y host:
+            name = self._ing_txt_name.text().strip()
+            host = self._ing_txt_host.text().strip()
+            if not name:
+                QMessageBox.warning(self, f"{ICON_WARN} Faltan datos",
+                                    "Pone un nombre al ingress.")
+                return
+            if not host:
+                QMessageBox.warning(self, f"{ICON_WARN} Faltan datos",
+                                    "Pone un hostname.")
+                return
+            # 1c - SI PIDIO AGREGAR AL HOSTS, LO HAGO ANTES DE ACEPTAR:
+            #      USO LA IP DEL INGRESS CONTROLLER (no 127.0.0.1):
+            if self._ing_chk_hosts.isChecked():
+                ip = _get_ingress_controller_ip()
+                try:
+                    _hosts_add_entry(ip, host)
+                except PermissionError:
+                    _hosts_open_in_editor([f"{ip} {host}"])
+                except Exception as e:
+                    QMessageBox.warning(self, f"{ICON_WARN} Hosts",
+                                        f"No se pudo modificar el hosts:\n{e}")
+            self.accept()
+
+    def values(self):
+        # 1 - DEVUELVO (mode, vals) SEGUN EL TAB ACTIVO:
+        idx = self._tabs.currentIndex()
+        if idx == 0:
+            # 1a - PORT FORWARDING: (pod, pod_port, local_port, https, browser):
+            local_txt = self._pf_txt_local.text().strip()
+            local = int(local_txt) if local_txt.isdigit() else None
+            pod = self._pf_combo_pod.currentData() if self._pf_combo_pod.isVisible() else self._pods[0]
+            return ("pf", (pod, self._pod_port, local,
+                          self._pf_chk_https.isChecked(),
+                          self._pf_chk_browser.isChecked()))
+        else:
+            # 1b - INGRESS: (name, host, svc_name, svc_port, class, path, tls):
+            return ("ingress", (
+                self._ing_txt_name.text().strip(),
+                self._ing_txt_host.text().strip(),
+                self._svc.metadata.name,
+                self._svc_port,
+                self._ing_combo_class.currentText(),
+                self._ing_txt_path.text().strip() or "/",
+                self._ing_chk_tls.isChecked(),
+            ))
+
+
+# ============================================================================
+# INGRESS: manager + panel + dialog + editor del archivo hosts de Windows
+# ============================================================================
+
+def _hosts_file_path():
+    # 1 - RUTA DEL ARCHIVO HOSTS DE WINDOWS:
+    #     C:\Windows\System32\drivers\etc\hosts (tipico en todas las versiones):
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                        "System32", "drivers", "etc", "hosts")
+
+
+def _read_hosts_file():
+    # 1 - LEO EL ARCHIVO HOSTS COMO LISTA DE LINEAS (sin el newline final):
+    path = _hosts_file_path()
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read().splitlines()
+    except Exception:
+        return []
+
+
+def _write_hosts_file(lines):
+    # 1 - ESCRIBO EL ARCHIVO HOSTS (necesita permisos de admin en Windows):
+    path = _hosts_file_path()
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+def _hosts_add_entry(ip, hostname):
+    # 1 - AGREGO UNA LINEA AL HOSTS (si no existe ya):
+    lines = _read_hosts_file()
+    entry = f"{ip} {hostname}"
+    for ln in lines:
+        if ln.strip() == entry or ln.strip().startswith("#") is False and hostname in ln.split():
+            return False  # ya existe
+    lines.append(entry)
+    _write_hosts_file(lines)
+    return True
+
+
+def _hosts_toggle_line(line_text, enable):
+    # 1 - COMENTA (#) O DESCOMENTA UNA LINEA DEL HOSTS:
+    stripped = line_text.lstrip()
+    if enable:
+        # 1a - DESCOMENTAR: quito el # inicial si lo tiene:
+        if stripped.startswith("#"):
+            return line_text.lstrip().lstrip("#").lstrip()
+        return line_text
+    else:
+        # 1b - COMENTAR: agrego # al inicio si no lo tiene:
+        if not stripped.startswith("#"):
+            return "# " + line_text
+        return line_text
+
+
+def _hosts_open_in_editor(lines_to_add=None):
+    # 1 - ABRO EL ARCHIVO HOSTS EN NOTEPAD (para que el usuario lo edite
+    #     a mano cuando MiniLens no tiene permisos de admin):
+    #     lines_to_add = lista de lineas que el usuario deberia pegar.
+    #     ADEMAS COPIA LAS LINEAS AL PORTAPAPELES automaticamente y
+    #     muestra un boton "Copiar" para volver a copiarlas:
+    path = _hosts_file_path()
+    try:
+        # 1a - ABRO NOTEPAD CON EL ARCHIVO HOSTS:
+        import subprocess
+        subprocess.Popen(["notepad.exe", path])
+    except Exception:
+        pass
+    if not lines_to_add:
+        return
+    # 2 - COPIO LAS LINEAS AL PORTAPAPELES AUTOMATICAMENTE:
+    texto = "\n".join(lines_to_add)
+    QApplication.clipboard().setText(texto)
+    # 3 - DIALOGO CON BOTON "COPIAR" PARA VOLVER A COPIAR AL PORTAPAPELES:
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Information)
+    msg.setWindowTitle(f"{ICON_INFO} Hosts")
+    msg.setText(
+        "No se pudo escribir el archivo hosts (necesita permisos de admin).\n\n"
+        "Se abrio el hosts en Notepad. Agrega estas lineas al final:\n\n"
+        + texto +
+        "\n\nGuarda el archivo en Notepad (Ctrl+S) y cerralo.\n"
+        "Si Notepad pide permisos de admin, acepta."
+    )
+    msg.setInformativeText("Las lineas ya estan copiadas al portapapeles.")
+    btn_copy = msg.addButton("Copiar de nuevo", QMessageBox.ActionRole)
+    msg.addButton(QMessageBox.Ok)
+    msg.exec()
+    # 2a - SI APRETA "COPIAR", VUELVO A COPIAR AL PORTAPAPELES:
+    if msg.clickedButton() is btn_copy:
+        QApplication.clipboard().setText(texto)
+
+
+def _get_ingress_controller_ip():
+    # 1 - RESUELVO LA IP DEL INGRESS CONTROLLER PARA EL HOSTS:
+    #     (ej: 10.24.17.227 xmpp-web.cyberdefense.indra.es)
+    #     1a - PRIMERO MIRO EL STATUS DE LOS INGRESSES EXISTENTES
+    #          (ahi queda la IP/hostname del LoadBalancer):
+    try:
+        api = client.NetworkingV1Api()
+        ings = api.list_ingress_for_all_namespaces(_request_timeout=10).items
+        for ing in ings:
+            st = getattr(ing, "status", None)
+            lb = getattr(st, "load_balancer", None) if st else None
+            for entry in (getattr(lb, "ingress", None) or []):
+                if getattr(entry, "ip", None):
+                    return entry.ip
+                if getattr(entry, "hostname", None):
+                    return entry.hostname
+    except Exception:
+        pass
+    # 1b - SI NO HAY INGRESSES, BUSCO SERVICES LoadBalancer CON IP EXTERNA:
+    try:
+        v1 = client.CoreV1Api()
+        svcs = v1.list_service_for_all_namespaces(_request_timeout=10).items
+        for s in svcs:
+            if s.spec and s.spec.type == "LoadBalancer" and s.status and s.status.load_balancer:
+                for lb in (s.status.load_balancer.ingress or []):
+                    if getattr(lb, "ip", None):
+                        return lb.ip
+                    if getattr(lb, "hostname", None):
+                        return lb.hostname
+    except Exception:
+        pass
+    # 2 - SI NO ENCONTRE NADA, FALLO A 127.0.0.1:
+    return "127.0.0.1"
+
+
+class IngressManager(QObject):
+    """Gestor de Ingresses: crea y borra ingresses del namespace actual
+    via la API de Kubernetes (networking.k8s.io/v1). Solo trackea los
+    ingresses que MiniLens crea en esta sesion (como PortForwardManager
+    trackea sus forwards), no todos los del namespace."""
+
+    updated = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._entries = []  # ingresses creados por MiniLens en esta sesion
+
+    def _api(self):
+        # 1 - CREO EL CLIENTE NetworkingV1Api CON LA CONFIG CARGADA:
+        return client.NetworkingV1Api()
+
+    def entries(self):
+        # 1 - DEVUELVO LOS INGRESSES CREADOS POR MINILENS EN ESTA SESION:
+        return list(self._entries)
+
+    def list_ingresses(self, namespace):
+        # 1 - LISTO TODOS LOS INGRESSES DEL NAMESPACE (los remotos del cluster):
+        try:
+            api = self._api()
+            return api.list_namespaced_ingress(namespace, _request_timeout=15).items
+        except ApiException as e:
+            raise Exception(f"K8s API error: {e.status} - {e.reason}")
+        except Exception as e:
+            raise
+
+    def list_ingress_classes(self):
+        # 1 - LISTO LAS INGRESS CLASSES DISPONIBLES EN EL CLUSTER:
+        #     (nginx, traefik, etc.) - si da 403 devuelvo lista vacia:
+        try:
+            api = self._api()
+            return [ic.metadata.name for ic in api.list_ingress_class(_request_timeout=10).items]
+        except Exception:
+            return []
+
+    def create_ingress(self, namespace, name, host, service_name, service_port,
+                       ingress_class, path="/", tls=False):
+        # 1 - ARMO EL OBJETO Ingress (networking.k8s.io/v1):
+        #     USO spec.ingressClassName (no la annotation deprecated):
+        body = client.V1Ingress(
+            api_version="networking.k8s.io/v1",
+            kind="Ingress",
+            metadata=client.V1ObjectMeta(
+                name=name,
+                namespace=namespace,
+            ),
+            spec=client.V1IngressSpec(
+                ingress_class_name=ingress_class if ingress_class else None,
+                rules=[
+                    client.V1IngressRule(
+                        host=host,
+                        http=client.V1HTTPIngressRuleValue(
+                            paths=[
+                                client.V1HTTPIngressPath(
+                                    path=path,
+                                    path_type="Prefix",
+                                    backend=client.V1IngressBackend(
+                                        service=client.V1IngressServiceBackend(
+                                            name=service_name,
+                                            port=client.V1ServiceBackendPort(number=int(service_port)),
+                                        ),
+                                    ),
+                                )
+                            ]
+                        ),
+                    )
+                ],
+            ),
+        )
+        # 1a - SI PIDO TLS, AGREGO EL HOST A TLS HOSTS:
+        if tls:
+            body.spec.tls = [client.V1IngressTLS(hosts=[host], secret_name=f"{name}-tls")]
+
+        # 2 - CREO EL INGRESS EN EL CLUSTER:
+        api = self._api()
+        try:
+            api.create_namespaced_ingress(namespace=namespace, body=body, _request_timeout=15)
+        except ApiException as e:
+            # 2a - SI YA EXISTE (409), AVISO SIMPLE Y NO HAGO NADA:
+            if e.status == 409:
+                raise Exception(f"Ya existe un ingress llamado '{name}' en {namespace}")
+            else:
+                raise Exception(f"K8s API error: {e.status} - {e.reason}")
+        except Exception as e:
+            raise
+
+        # 3 - TRACKEO EL INGRESS CREADO (como PortForwardManager trackea sus forwards):
+        #     SI YA ESTABA EN LA LISTA (overwrite), LO REEMPLAZO:
+        self._entries = [x for x in self._entries
+                         if not (x["name"] == name and x["namespace"] == namespace)]
+        self._entries.append({
+            "name": name,
+            "namespace": namespace,
+            "host": host,
+            "service": service_name,
+            "port": int(service_port),
+            "class": ingress_class,
+            "path": path,
+            "tls": tls,
+        })
+        self.updated.emit()
+        return True
+
+    def delete_ingress(self, namespace, name):
+        # 1 - BORRO EL INGRESS DEL CLUSTER:
+        api = self._api()
+        api.delete_namespaced_ingress(name=name, namespace=namespace, _request_timeout=15)
+        # 2 - LO SACO DE LA LISTA DE INGRESSES DE MINILENS:
+        self._entries = [e for e in self._entries
+                         if not (e["name"] == name and e["namespace"] == namespace)]
+        self.updated.emit()
+        return True
+
+    def shutdown(self):
+        # 1 - AL CERRAR LA APP: NO borro los ingresses del cluster (son
+        #     recursos persistentes, no procesos locales como los
+        #     port-forwards). Solo limpio la lista en memoria:
+        self._entries = []
+
+
+class IngressPanel(QDialog):
+    """Panel de Ingresses: lista los ingresses del namespace actual con
+    sus hosts/services/paths y permite crear nuevos o borrar existentes."""
+
+    def __init__(self, manager, namespace, parent=None, new_ingress_cb=None,
+                 services=None, on_change_cb=None):
+        super().__init__(parent)
+        self._manager = manager
+        self._namespace = namespace
+        self._new_cb = new_ingress_cb
+        self._on_change_cb = on_change_cb
+        self._services = services or []
+
+        self.setWindowTitle(f"{ICON_INGRESS}  Ingresses - {namespace}")
+        self.resize(820, 420)
+
+        lay = QVBoxLayout(self)
+
+        # 1 - FILA SUPERIOR: BOTON PARA CREAR UN INGRESS NUEVO + EDITOR HOSTS:
+        top = QHBoxLayout()
+        top.addStretch()
+        btn_hosts = QPushButton(f"{ICON_INGRESS}  Editar hosts...")
+        btn_hosts.setToolTip("Abrir el archivo hosts de Windows con checkboxes para habilitar/comentar lineas")
+        btn_hosts.clicked.connect(self._open_hosts_editor)
+        top.addWidget(btn_hosts)
+        btn_new = QPushButton(f"{ICON_PLUS}  Nuevo Ingress...")
+        btn_new.setToolTip("Crear un ingress apuntando a un service del namespace")
+        btn_new.clicked.connect(self._new_ingress)
+        top.addWidget(btn_new)
+        lay.addLayout(top)
+
+        # 2 - TABLA DE INGRESSES:
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["NOMBRE", "HOST", "SERVICE", "PORT", "PATH", "ACCIONES"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        lay.addWidget(self.table)
+
+        # 3 - BOTON CERRAR:
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(self.accept)
+        lay.addWidget(btn_close)
+
+        # 4 - CARGO LOS INGRESSES:
+        self._refresh()
+
+    def _new_ingress(self):
+        # 1 - ABRO EL DIALOGO PARA CREAR UN INGRESS NUEVO:
+        if self._new_cb:
+            self._new_cb()
+        self._refresh()
+
+    def _open_hosts_editor(self):
+        # 1 - ABRO EL MODAL CON EL ARCHIVO HOSTS DE WINDOWS:
+        dlg = HostsFileDialog(self)
+        dlg.exec()
+
+    def refresh(self):
+        self._refresh()
+
+    def _refresh(self):
+        # 1 - LIMPIO Y REPUEBLO LA TABLA con los ingresses que MiniLens
+        #     creo en esta sesion (no todos los del namespace):
+        self.table.setRowCount(0)
+        entries = self._manager.entries()
+
+        self.table.setRowCount(len(entries))
+        for i, e in enumerate(entries):
+            name = e["name"]
+            host = e.get("host", "-")
+            svc = e.get("service", "-")
+            port = str(e.get("port", "-"))
+            path = e.get("path", "-")
+            self.table.setItem(i, 0, QTableWidgetItem(name))
+            self.table.setItem(i, 1, QTableWidgetItem(host))
+            self.table.setItem(i, 2, QTableWidgetItem(svc))
+            self.table.setItem(i, 3, QTableWidgetItem(port))
+            self.table.setItem(i, 4, QTableWidgetItem(path))
+
+            # 1b - BOTON BORRAR:
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(2, 0, 2, 0)
+            btn_del = QPushButton("Borrar")
+            btn_del.setStyleSheet("QPushButton { color: #ff9800; }")
+            btn_del.clicked.connect(
+                lambda checked, ns=self._namespace, nm=name: self._delete_ingress(ns, nm)
+            )
+            h.addWidget(btn_del)
+            h.addStretch()
+            self.table.setCellWidget(i, 5, w)
+
+    def _delete_ingress(self, namespace, name):
+        # 1 - PIDO CONFIRMACION ANTES DE BORRAR:
+        resp = QMessageBox.question(
+            self,
+            f"{ICON_WARN} Borrar Ingress",
+            f"Seguro que queres borrar el ingress '{name}' del namespace '{namespace}'?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        try:
+            self._manager.delete_ingress(namespace, name)
+            self._refresh()
+            # 1 - AVISO A LA VENTANA PRINCIPAL PARA QUE REFRESQUE EL TRAY:
+            if self._on_change_cb:
+                self._on_change_cb()
+        except Exception as e:
+            QMessageBox.critical(self, f"{ICON_WARN} Borrar Ingress",
+                                 f"No se pudo borrar el ingress:\n{e}")
+
+
+class IngressDialog(QDialog):
+    """Dialogo para crear un Ingress nuevo: elige service, port, host,
+    ingress class y path. Al crear, tambien agrega el host al archivo
+    hosts de Windows."""
+
+    def __init__(self, services, namespace, ingress_classes, parent=None):
+        super().__init__(parent)
+        self._services = services
+        self._namespace = namespace
+        self._ingress_classes = ingress_classes or []
+
+        self.setWindowTitle(f"{ICON_INGRESS}  Nuevo Ingress - {namespace}")
+        self.resize(480, 320)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel("Crea un Ingress que rutea un host HTTP a un service:"))
+
+        form = QFormLayout()
+
+        # 1 - NOMBRE DEL INGRESS:
+        self.txt_name = QLineEdit()
+        self.txt_name.setPlaceholderText("ej: forgejo-ingress")
+        form.addRow("Nombre:", self.txt_name)
+
+        # 2 - SERVICE (combo con todos los services del namespace):
+        self.combo_service = QComboBox()
+        for svc in sorted(services, key=lambda s: s.metadata.name):
+            self.combo_service.addItem(svc.metadata.name, svc)
+        self.combo_service.currentIndexChanged.connect(self._on_service_changed)
+        form.addRow("Service:", self.combo_service)
+
+        # 3 - PUERTO DEL SERVICE (combo con los ports del service elegido):
+        self.combo_port = QComboBox()
+        form.addRow("Puerto service:", self.combo_port)
+
+        # 4 - HOSTNAME:
+        self.txt_host = QLineEdit()
+        self.txt_host.setPlaceholderText("ej: forgejo.midominio.es")
+        form.addRow("Hostname:", self.txt_host)
+
+        # 5 - INGRESS CLASS (combo con las classes detectadas):
+        self.combo_class = QComboBox()
+        if self._ingress_classes:
+            for ic in self._ingress_classes:
+                self.combo_class.addItem(ic)
+            self.combo_class.setCurrentIndex(0)
+        else:
+            # 5a - SI NO HAY CLASSES DETECTADAS, OFREZCO LAS COMUNES:
+            self.combo_class.addItems(["nginx", "traefik"])
+        form.addRow("Ingress class:", self.combo_class)
+
+        # 6 - PATH:
+        self.txt_path = QLineEdit("/")
+        form.addRow("Path:", self.txt_path)
+
+        # 7 - TLS:
+        self.chk_tls = QCheckBox("Habilitar TLS (crea secret {name}-tls)")
+        form.addRow("", self.chk_tls)
+
+        # 8 - AGREGAR AL HOSTS DE WINDOWS:
+        self.chk_hosts = QCheckBox("Agregar al archivo hosts de Windows (127.0.0.1 hostname)")
+        self.chk_hosts.setChecked(True)
+        form.addRow("", self.chk_hosts)
+
+        lay.addLayout(form)
+
+        # 9 - BOTONES:
+        btns = QHBoxLayout()
+        btns.addStretch()
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        btn_create = QPushButton("Crear")
+        btn_create.clicked.connect(self._on_create)
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_create)
+        lay.addLayout(btns)
+
+        # 10 - CARGO LOS PUERTOS DEL PRIMER SERVICE:
+        self._on_service_changed(0)
+
+    def _on_service_changed(self, _idx):
+        # 1 - REPUEBLO EL COMBO DE PUERTOS SEGUN EL SERVICE ELEGIDO:
+        self.combo_port.clear()
+        svc = self.combo_service.currentData()
+        if not svc or not svc.spec or not svc.spec.ports:
+            return
+        for p in svc.spec.ports:
+            self.combo_port.addItem(str(p.port))
+        # 1a - SI EL NOMBRE DEL INGRESS ESTA VACIO, LO SUGIERO:
+        if not self.txt_name.text().strip() and svc.metadata.name:
+            self.txt_name.setText(f"{svc.metadata.name}-ingress")
+        # 1b - SI EL HOST ESTA VACIO, LO SUGIERO:
+        if not self.txt_host.text().strip() and svc.metadata.name:
+            self.txt_host.setText(f"{svc.metadata.name}.local")
+
+    def _on_create(self):
+        # 1 - VALIDO LOS CAMPOS OBLIGATORIOS:
+        name = self.txt_name.text().strip()
+        host = self.txt_host.text().strip()
+        svc_name = self.combo_service.currentText()
+        port_txt = self.combo_port.currentText()
+        if not name:
+            QMessageBox.warning(self, f"{ICON_WARN} Faltan datos", "Pone un nombre al ingress.")
+            return
+        if not host:
+            QMessageBox.warning(self, f"{ICON_WARN} Faltan datos", "Pone un hostname.")
+            return
+        if not svc_name or not port_txt:
+            QMessageBox.warning(self, f"{ICON_WARN} Faltan datos", "Elegi un service y un puerto.")
+            return
+
+        # 2 - SI PIDIO AGREGAR AL HOSTS, LO HAGO ANTES DE CREAR EL INGRESS:
+        #     USO LA IP DEL INGRESS CONTROLLER (no 127.0.0.1):
+        if self.chk_hosts.isChecked():
+            ip = _get_ingress_controller_ip()
+            try:
+                _hosts_add_entry(ip, host)
+            except PermissionError:
+                _hosts_open_in_editor([f"{ip} {host}"])
+            except Exception as e:
+                QMessageBox.warning(self, f"{ICON_WARN} Hosts",
+                                    f"No se pudo modificar el hosts:\n{e}")
+
+        # 3 - ACEPTO EL DIALOGO (el padre crea el ingress):
+        self.accept()
+
+    def values(self):
+        # 1 - DEVUELVO (name, host, service_name, service_port, class, path, tls):
+        return (
+            self.txt_name.text().strip(),
+            self.txt_host.text().strip(),
+            self.combo_service.currentText(),
+            int(self.combo_port.currentText()),
+            self.combo_class.currentText(),
+            self.txt_path.text().strip() or "/",
+            self.chk_tls.isChecked(),
+        )
+
+
+class HostsFileDialog(QDialog):
+    """Modal que muestra el archivo hosts de Windows con un checkbox por
+    linea: checked = habilitado, unchecked = comentado con #. Al cerrar
+    guarda los cambios."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"{ICON_INGRESS}  Archivo hosts de Windows")
+        self.resize(620, 460)
+
+        self._lines = _read_hosts_file()
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(QLabel(
+            "Cada linea con checkbox activo esta habilitada. "
+            "Si deschequeas, se comenta con # al guardar."
+        ))
+
+        # 1 - LISTA DE LINEAS CON CHECKBOX:
+        self.list = QListWidget()
+        for ln in self._lines:
+            item = QListWidgetItem(ln)
+            # 1a - CHECKED SI LA LINEA NO EMPIEZA CON # (o esta vacia):
+            stripped = ln.strip()
+            item.setCheckState(Qt.Checked if stripped and not stripped.startswith("#") else Qt.Unchecked)
+            self.list.addItem(item)
+        lay.addWidget(self.list)
+
+        # 2 - BOTONES:
+        btns = QHBoxLayout()
+        btns.addStretch()
+        btn_cancel = QPushButton("Cancelar")
+        btn_cancel.clicked.connect(self.reject)
+        btn_save = QPushButton("Guardar")
+        btn_save.clicked.connect(self._on_save)
+        btns.addWidget(btn_cancel)
+        btns.addWidget(btn_save)
+        lay.addLayout(btns)
+
+    def _on_save(self):
+        # 1 - RECONSTRUYO LAS LINEAS SEGUN EL ESTADO DE CADA CHECKBOX:
+        new_lines = []
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            text = item.text()
+            if item.checkState() == Qt.Checked:
+                # 1a - DESCOMENTAR SI ESTABA COMENTADA:
+                new_lines.append(_hosts_toggle_line(text, enable=True))
+            else:
+                # 1b - COMENTAR SI NO LO ESTABA:
+                new_lines.append(_hosts_toggle_line(text, enable=False))
+        # 2 - GUARDO EL ARCHIVO:
+        try:
+            _write_hosts_file(new_lines)
+            self.accept()
+        except PermissionError:
+            # 2a - NO HAY PERMISOS: ABRO NOTEPAD Y COPIO EL CONTENIDO
+            #      COMO DEBERIA QUEDAR (con boton para volver a copiar):
+            _hosts_open_in_editor(new_lines)
+        except Exception as e:
+            QMessageBox.critical(self, f"{ICON_WARN} Hosts",
+                                 f"No se pudo guardar el hosts:\n{e}")
+
+
+class RemoteIngressPanel(QDialog):
+    """Panel con TODOS los ingresses que ya existen en el cluster remoto.
+    Permite 'enganchar' tu PC al host de un ingress (agrega la entrada al
+    hosts de Windows: IP_del_controller -> hostname) para que el navegador
+    resuelva y llegue al cluster. Tambien permite borrar ingresses remotos."""
+
+    def __init__(self, manager, namespace, parent=None):
+        super().__init__(parent)
+        self._manager = manager
+        self._namespace = namespace
+
+        self.setWindowTitle(f"{ICON_INGRESS}  Ingresses del cluster - {namespace}")
+        self.resize(900, 480)
+
+        lay = QVBoxLayout(self)
+
+        # 1 - INFO ARRIBA:
+        info = QLabel(
+            "Estos son los ingresses que ya existen en el cluster.\n"
+            "Clic en 'Enganchar' para que tu PC resuelva el hostname contra el ingress controller."
+        )
+        lay.addWidget(info)
+
+        # 2 - TABLA DE INGRESSES REMOTOS:
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(
+            ["NOMBRE", "HOST", "SERVICE", "PORT", "PATH", "ACCIONES"]
+        )
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        lay.addWidget(self.table)
+
+        # 3 - BOTON CERRAR:
+        btn_close = QPushButton("Cerrar")
+        btn_close.clicked.connect(self.accept)
+        lay.addWidget(btn_close)
+
+        # 4 - CARGO LOS INGRESSES REMOTOS:
+        self._refresh()
+
+    def refresh(self):
+        self._refresh()
+
+    def _refresh(self):
+        # 1 - LIMPIO Y REPUEBLO LA TABLA con TODOS los ingresses del
+        #     namespace que existen en el cluster remoto:
+        self.table.setRowCount(0)
+        try:
+            ingresses = self._manager.list_ingresses(self._namespace)
+        except Exception as e:
+            QMessageBox.warning(self, f"{ICON_WARN} Ingresses del cluster",
+                                f"No se pudieron listar los ingresses:\n{e}")
+            return
+
+        self.table.setRowCount(len(ingresses))
+        for i, ing in enumerate(ingresses):
+            name = ing.metadata.name
+            # 1a - SACO HOST, SERVICE, PORT Y PATH DEL PRIMER RULE:
+            host = "-"
+            svc = "-"
+            port = "-"
+            path = "-"
+            if ing.spec and ing.spec.rules:
+                rule = ing.spec.rules[0]
+                host = rule.host or "-"
+                if rule.http and rule.http.paths:
+                    p = rule.http.paths[0]
+                    path = p.path or "/"
+                    if p.backend and p.backend.service:
+                        svc = p.backend.service.name or "-"
+                        if p.backend.service.port:
+                            port = str(p.backend.service.port.number or
+                                        p.backend.service.port.name or "-")
+            self.table.setItem(i, 0, QTableWidgetItem(name))
+            self.table.setItem(i, 1, QTableWidgetItem(host))
+            self.table.setItem(i, 2, QTableWidgetItem(svc))
+            self.table.setItem(i, 3, QTableWidgetItem(port))
+            self.table.setItem(i, 4, QTableWidgetItem(path))
+
+            # 1b - ACCIONES: Enganchar (hosts) + Borrar:
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(2, 0, 2, 0)
+            btn_hook = QPushButton("Enganchar")
+            btn_hook.setToolTip(
+                "Agregar la entrada al hosts de Windows para que tu PC\n"
+                "resuelva el hostname del ingress (host -> IP del controller)"
+            )
+            btn_hook.clicked.connect(
+                lambda checked, nm=name, hs=host: self._hook_ingress(nm, hs)
+            )
+            h.addWidget(btn_hook)
+            btn_del = QPushButton("Borrar")
+            btn_del.setStyleSheet("QPushButton { color: #ff9800; }")
+            btn_del.clicked.connect(
+                lambda checked, ns=self._namespace, nm=name: self._delete_ingress(ns, nm)
+            )
+            h.addWidget(btn_del)
+            h.addStretch()
+            self.table.setCellWidget(i, 5, w)
+
+    def _hook_ingress(self, name, host):
+        # 1 - ENGANCHO MI PC AL INGRESS REMOTO: agrego la entrada al hosts
+        #     de Windows (hostname -> IP del ingress controller) para que
+        #     el navegador resuelva el host y llegue al cluster:
+        if not host or host == "-":
+            QMessageBox.warning(self, f"{ICON_WARN} Enganchar",
+                                f"El ingress '{name}' no tiene host definido.")
+            return
+        ip = _get_ingress_controller_ip()
+        linea = f"{ip} {host}"
+        try:
+            _hosts_add_entry(ip, host)
+            # 1a - OK: COPIO LA LINEA AL PORTAPAPELES Y AVISO:
+            QApplication.clipboard().setText(linea)
+            QMessageBox.information(
+                self, f"{ICON_OK} Enganchado",
+                f"Entrada agregada al hosts de Windows:\n\n{linea}\n\n"
+                f"Ya esta copiada al portapapeles. Ahora tu PC resuelve\n"
+                f"'{host}' contra el ingress controller del cluster.",
+            )
+        except PermissionError:
+            # 1b - SIN PERMISOS: NOTEPAD + PORTAPAPELES + BOTON COPIAR:
+            _hosts_open_in_editor([linea])
+        except Exception as e:
+            QMessageBox.critical(self, f"{ICON_WARN} Enganchar",
+                                 f"No se pudo modificar el hosts:\n{e}")
+
+    def _delete_ingress(self, namespace, name):
+        # 1 - PIDO CONFIRMACION ANTES DE BORRAR:
+        resp = QMessageBox.question(
+            self,
+            f"{ICON_WARN} Borrar Ingress",
+            f"Seguro que queres borrar el ingress '{name}' del namespace '{namespace}'?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if resp != QMessageBox.Yes:
+            return
+        try:
+            self._manager.delete_ingress(namespace, name)
+            self._refresh()
+        except Exception as e:
+            QMessageBox.critical(self, f"{ICON_WARN} Borrar Ingress",
+                                 f"No se pudo borrar el ingress:\n{e}")
 
 
 class PodDetailWindow(QDialog):
